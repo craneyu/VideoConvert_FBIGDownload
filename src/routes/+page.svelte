@@ -8,6 +8,7 @@
   import { onMount } from "svelte";
   import { slide, fade, fly } from "svelte/transition";
   import { flip } from "svelte/animate";
+  import { settingsStore } from "$lib/stores/settings.svelte";
 
   // --- Types ---
   interface DownloadTask {
@@ -49,6 +50,14 @@
     preset: "balanced",
     resolution: "original",
     codec: "h264"
+  });
+
+  let settingsApplied = false;
+  $effect(() => {
+    if (settingsStore.settings && !settingsApplied) {
+      globalOptions.preset = settingsStore.settings.transcoding_preset.toLowerCase();
+      settingsApplied = true;
+    }
   });
 
   onMount(async () => {
@@ -180,7 +189,7 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
       console.log("Recorded to DB, ID:", nextTask.dbId);
       await loadHistory();
 
-      const dlDir = await downloadDir();
+      const dlDir = settingsStore.settings?.download_path || await downloadDir();
       // Important: id must be a string for Rust's String type
       const taskId = String(nextTask.dbId);
       
@@ -190,7 +199,8 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
         id: taskId, 
         url: nextTask.url, 
         downloadDir: dlDir,
-        source: nextTask.source
+        source: nextTask.source,
+        autoOrganize: settingsStore.settings?.auto_organize ?? false
       });
 
       console.log("Download finished, path:", finalPath);
@@ -261,7 +271,7 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
     console.log("Starting transcoding for task:", task.id, task.inputPath);
 
     try {
-      const dlDir = await downloadDir();
+      const dlDir = settingsStore.settings?.download_path || await downloadDir();
       // Ensure the base path ends with a slash or add one
       const basePath = dlDir.endsWith('/') ? dlDir : `${dlDir}/`;
       const transcodedDir = `${basePath}VidBridge/Transcoded`;
@@ -342,6 +352,16 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
         下載歷史
       </button>
+      
+      <div class="pt-4 mt-4 border-t border-neutral-200 dark:border-neutral-800">
+        <a 
+          href="/settings"
+          class="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium text-neutral-500 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-all"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+          軟體設定
+        </a>
+      </div>
     </nav>
 
     <div class="mt-auto pt-6 border-t border-neutral-200 dark:border-neutral-800">

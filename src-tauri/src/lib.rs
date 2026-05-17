@@ -21,10 +21,11 @@ pub fn run() {
             tauri_plugin_sql::Builder::default()
                 .add_migrations(
                     "sqlite:vidbridge.db",
-                    vec![tauri_plugin_sql::Migration {
-                        version: 1,
-                        description: "create download_history table",
-                        sql: "CREATE TABLE download_history (
+                    vec![
+                        tauri_plugin_sql::Migration {
+                            version: 1,
+                            description: "create download_history table",
+                            sql: "CREATE TABLE download_history (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             url TEXT NOT NULL,
                             title TEXT,
@@ -33,8 +34,18 @@ pub fn run() {
                             source TEXT,
                             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                         );",
-                        kind: tauri_plugin_sql::MigrationKind::Up,
-                    }],
+                            kind: tauri_plugin_sql::MigrationKind::Up,
+                        },
+                        tauri_plugin_sql::Migration {
+                            version: 2,
+                            description: "create settings table",
+                            sql: "CREATE TABLE settings (
+                                key TEXT PRIMARY KEY,
+                                value TEXT NOT NULL
+                            );",
+                            kind: tauri_plugin_sql::MigrationKind::Up,
+                        }
+                    ],
                 )
                 .build(),
         )
@@ -98,6 +109,8 @@ pub fn run() {
             commands::download::download_video,
             commands::download::open_folder,
             commands::transcode::transcode_video,
+            commands::settings::get_settings,
+            commands::settings::update_setting,
             commands::utils::check_dependencies
         ])
         .run(tauri::generate_context!())

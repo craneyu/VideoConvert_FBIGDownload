@@ -41,13 +41,17 @@ pub async fn fetch_video_info(url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn download_video(app: AppHandle, id: String, url: String, download_dir: String, source: String) -> Result<String, String> {
+pub async fn download_video(app: AppHandle, id: String, url: String, download_dir: String, source: String, auto_organize: bool) -> Result<String, String> {
     let yt_dlp_path = find_tool_path("yt-dlp").ok_or("yt-dlp not found")?;
     let ffmpeg_path = find_tool_path("ffmpeg").ok_or("ffmpeg not found")?;
 
-    let target_dir = std::path::PathBuf::from(&download_dir)
-        .join("VidBridge")
-        .join(&source);
+    let target_dir = if auto_organize {
+        std::path::PathBuf::from(&download_dir)
+            .join("VidBridge")
+            .join(&source)
+    } else {
+        std::path::PathBuf::from(&download_dir)
+    };
     
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("Failed to create directory: {}", e))?;
