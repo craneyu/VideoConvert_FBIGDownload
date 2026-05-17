@@ -261,7 +261,12 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
     console.log("Starting transcoding for task:", task.id, task.inputPath);
 
     try {
-      const outputPath = task.inputPath.replace(/\.[^/.]+$/, "") + "_converted.mp4";
+      const dlDir = await downloadDir();
+      // Ensure the base path ends with a slash or add one
+      const basePath = dlDir.endsWith('/') ? dlDir : `${dlDir}/`;
+      const transcodedDir = `${basePath}VidBridge/Transcoded`;
+      const outputPath = `${transcodedDir}/${task.fileName.replace(/\.[^/.]+$/, "")}_converted.mp4`;
+      
       console.log("Output path will be:", outputPath);
 
       const result = await invoke("transcode_video", {

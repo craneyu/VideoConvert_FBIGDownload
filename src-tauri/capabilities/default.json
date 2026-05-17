@@ -12,6 +12,9 @@
     "sql:allow-load",
     "sql:allow-execute",
     "sql:allow-select",
-    "updater:default"
+    "updater:default",
+    "fs:default",
+    "fs:allow-home-read",
+    "fs:allow-home-write"
   ]
 }
