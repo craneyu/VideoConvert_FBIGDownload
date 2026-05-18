@@ -1,5 +1,7 @@
 use std::process::Command;
 use std::path::Path;
+use tauri::AppHandle;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[tauri::command]
 pub fn check_dependencies() -> Result<Vec<String>, String> {
@@ -13,6 +15,13 @@ pub fn check_dependencies() -> Result<Vec<String>, String> {
     }
 
     Ok(missing)
+}
+
+#[tauri::command]
+pub fn read_clipboard_text(app: AppHandle) -> Result<String, String> {
+    app.clipboard()
+        .read_text()
+        .map_err(|e| e.to_string())
 }
 
 pub fn find_tool_path(name: &str) -> Option<String> {

@@ -4,20 +4,28 @@ export interface Settings {
     download_path: string;
     auto_organize: boolean;
     transcoding_preset: string;
+    detect_clipboard: boolean;
 }
 
 class SettingsStore {
     settings = $state<Settings | null>(null);
     loading = $state(true);
 
-    async load() {
+    async load(retries = 10) {
         this.loading = true;
         try {
             this.settings = await invoke<Settings>('get_settings');
         } catch (e) {
             console.error('Failed to load settings:', e);
+            if (retries > 0 && String(e).includes('Database not loaded')) {
+                console.log(`Database not ready, retrying... (${retries} left)`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                return this.load(retries - 1);
+            }
         } finally {
-            this.loading = false;
+            if (this.settings || retries === 0) {
+                this.loading = false;
+            }
         }
     }
 

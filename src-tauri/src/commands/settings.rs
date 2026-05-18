@@ -9,6 +9,7 @@ pub struct Settings {
     pub download_path: String,
     pub auto_organize: bool,
     pub transcoding_preset: String,
+    pub detect_clipboard: bool,
 }
 
 impl Default for Settings {
@@ -21,6 +22,7 @@ impl Default for Settings {
             download_path,
             auto_organize: false,
             transcoding_preset: "Balanced".to_string(),
+            detect_clipboard: true,
         }
     }
 }
@@ -36,6 +38,11 @@ impl Settings {
                     }
                 }
                 "transcoding_preset" => self.transcoding_preset = value,
+                "detect_clipboard" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.detect_clipboard = b;
+                    }
+                }
                 _ => {}
             }
         }

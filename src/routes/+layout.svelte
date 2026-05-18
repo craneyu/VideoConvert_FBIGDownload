@@ -5,8 +5,11 @@
 
   let { children } = $props();
 
+  // Load settings immediately on initialization
+  settingsStore.load();
+
   onMount(() => {
-    settingsStore.load();
+    // Initial load already handled, but keeping onMount for potential other logic
   });
 </script>
 

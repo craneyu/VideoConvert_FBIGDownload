@@ -118,3 +118,51 @@ code:
   - src/lib/stores/settings.svelte.ts
   - GEMINI.md
 -->
+
+---
+### Requirement: Enhanced Settings Interaction
+The settings interface SHALL provide immediate visual feedback for all user interactions to confirm that changes are being registered.
+
+#### Scenario: Toggling a setting
+- **WHEN** the user changes a setting (e.g., toggling 'Auto-organize')
+- **THEN** the control SHALL animate its state change and provide a subtle background highlight during the interaction.
+
+<!-- @trace
+source: beautify-settings-page
+updated: 2026-05-18
+code:
+  - src/routes/+page.svelte
+  - src/routes/settings/+page.svelte
+  - src-tauri/src/commands/settings.rs
+  - src-tauri/src/commands/utils.rs
+  - .spectra.yaml
+  - src/lib/stores/settings.svelte.ts
+  - src-tauri/Cargo.toml
+  - CLAUDE.md
+  - GEMINI.md
+  - src-tauri/src/lib.rs
+-->
+
+---
+### Requirement: Clipboard Detection Toggle
+The system SHALL provide a setting to enable or disable automatic clipboard detection of video URLs.
+
+#### Scenario: Disabling clipboard detection
+- **WHEN** the user toggles the "Auto-detect clipboard" setting to OFF
+- **THEN** the system SHALL NOT perform clipboard scans even when the window is focused
+
+<!-- @trace
+source: clipboard-auto-detection
+updated: 2026-05-18
+code:
+  - src-tauri/Cargo.toml
+  - .spectra.yaml
+  - src-tauri/src/commands/utils.rs
+  - CLAUDE.md
+  - src/lib/stores/settings.svelte.ts
+  - GEMINI.md
+  - src/routes/+page.svelte
+  - src-tauri/src/commands/settings.rs
+  - src/routes/settings/+page.svelte
+  - src-tauri/src/lib.rs
+-->

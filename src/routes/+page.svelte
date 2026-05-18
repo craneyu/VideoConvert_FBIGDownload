@@ -36,6 +36,12 @@
   let activeTab = $state("download"); // "download" | "transcode" | "history"
   let db: any;
   let urlInput = $state("");
+  let detectedUrl = $state(""); // New: Store detected clipboard URL
+  let lastCheckedClipboard = ""; // New: Prevent duplicate detection
+
+  // Regex Patterns for FB/IG
+  const FB_REGEX = /https?:\/\/(www\.)?(facebook\.com|fb\.watch)\/.+/;
+  const IG_REGEX = /https?:\/\/(www\.)?instagram\.com\/(p|reels|reel)\/.+/;
 
   // Queue State
   let downloadTasks = $state<DownloadTask[]>([]);
@@ -114,6 +120,34 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
       unlistenTr();
       unlistenDrop();
     };
+  });
+
+  // --- Clipboard Detection Logic ---
+  $effect(() => {
+    const handleFocus = async () => {
+      if (settingsStore.settings?.detect_clipboard && activeTab === 'download') {
+        try {
+          const text = await invoke<string | null>("read_clipboard_text");
+          if (text && text !== lastCheckedClipboard && text !== urlInput) {
+            lastCheckedClipboard = text;
+            if (FB_REGEX.test(text) || IG_REGEX.test(text)) {
+              console.log("Detected video URL in clipboard:", text);
+              detectedUrl = text;
+            } else {
+              detectedUrl = "";
+            }
+          }
+        } catch (e) {
+          console.error("Clipboard access error:", e);
+        }
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    // Trigger once on effect run if focused
+    if (document.hasFocus()) handleFocus();
+
+    return () => window.removeEventListener("focus", handleFocus);
   });
 
   async function loadHistory() {
@@ -383,6 +417,37 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
           <h2 class="text-3xl font-extrabold tracking-tight mb-2">影片下載</h2>
           <p class="text-neutral-500 dark:text-neutral-400">貼上網址，我們會自動為您分類與下載</p>
         </header>
+
+        {#if detectedUrl}
+          <div 
+            transition:slide
+            class="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800 rounded-2xl flex items-center justify-between gap-4 shadow-sm"
+          >
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center flex-shrink-0 shadow-lg shadow-blue-500/20">
+                <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"></path></svg>
+              </div>
+              <div class="min-w-0">
+                <p class="text-xs font-black text-blue-600 dark:text-blue-400 uppercase tracking-widest mb-0.5">偵測到剪貼簿網址</p>
+                <p class="text-sm font-bold truncate dark:text-neutral-200">{detectedUrl}</p>
+              </div>
+            </div>
+            <div class="flex items-center gap-2 flex-shrink-0">
+              <button 
+                onclick={() => { urlInput = detectedUrl; detectedUrl = ""; }}
+                class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition-all shadow-md shadow-blue-600/20 active:scale-95"
+              >
+                使用此連結
+              </button>
+              <button 
+                onclick={() => detectedUrl = ""}
+                class="p-2 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 transition-colors"
+              >
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+              </button>
+            </div>
+          </div>
+        {/if}
 
         <div class="flex gap-3 mb-10">
           <div class="flex-1 relative group">

@@ -17,6 +17,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_sql::Builder::default()
                 .add_migrations(
@@ -111,7 +112,8 @@ pub fn run() {
             commands::transcode::transcode_video,
             commands::settings::get_settings,
             commands::settings::update_setting,
-            commands::utils::check_dependencies
+            commands::utils::check_dependencies,
+            commands::utils::read_clipboard_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
