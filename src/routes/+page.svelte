@@ -79,9 +79,34 @@
 
     await checkUpdate();
 
-    const missing = await invoke("check_dependencies");
-    if (Array.isArray(missing) && missing.length > 0) {
-      alert(`系統缺少必要組件: ${missing.join(", ")}。請確保已安裝 ffmpeg 與 yt-dlp。`);
+    // Check dependencies and auto-install if needed
+    try {
+      const result: any = await invoke("check_dependencies");
+      if (result && result.dependencies) {
+        const missing = result.dependencies.filter((d: any) => !d.installed);
+        if (missing.length > 0) {
+          const toolNames = missing.map((d: any) => d.name);
+          const userConfirm = confirm(
+            `偵測到您的系統 (${result.platform}) 缺少以下必要組件：\n${toolNames.join(", ")}\n\n是否要自動安裝？`
+          );
+          if (userConfirm) {
+            const installResults: string[] = await invoke("install_dependencies", { tools: toolNames });
+            const summary = installResults.join("\n");
+            alert(`安裝結果：\n${summary}`);
+          } else {
+            alert(`請手動安裝以下組件：${toolNames.join(", ")}`);
+          }
+        } else {
+          // All installed, check for updates for yt-dlp (most frequently updated)
+          const ytdlp = result.dependencies.find((d: any) => d.name === "yt-dlp");
+          if (ytdlp && ytdlp.installed) {
+            // Silently attempt to update yt-dlp in background
+            invoke("install_dependencies", { tools: ["yt-dlp"] }).catch((e) => console.error("Background yt-dlp update failed:", e));
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Dependency check failed:", e);
     }
 
     // Progress Listeners
