@@ -519,11 +519,22 @@ pub fn read_clipboard_text(app: AppHandle) -> Result<String, String> {
 pub fn find_tool_path(name: &str) -> Option<String> {
     // Platform-specific common paths
     #[cfg(target_os = "macos")]
-    let common_paths = vec![
-        format!("/opt/homebrew/bin/{}", name),
-        format!("/usr/local/bin/{}", name),
-        format!("/usr/bin/{}", name),
-    ];
+    let common_paths = {
+        let mut paths = vec![
+            format!("/opt/homebrew/bin/{}", name),
+            format!("/usr/local/bin/{}", name),
+            format!("/usr/bin/{}", name),
+        ];
+        // Add user-specific paths (pip --user, pipx, pyenv, etc.)
+        if let Ok(home) = std::env::var("HOME") {
+            paths.push(format!("{}/.local/bin/{}", home, name));
+            paths.push(format!("{}/Library/Python/3.11/bin/{}", home, name));
+            paths.push(format!("{}/Library/Python/3.12/bin/{}", home, name));
+            paths.push(format!("{}/Library/Python/3.13/bin/{}", home, name));
+            paths.push(format!("{}/.pyenv/shims/{}", home, name));
+        }
+        paths
+    };
 
     #[cfg(target_os = "windows")]
     let common_paths = {
@@ -613,6 +624,25 @@ pub fn find_tool_path(name: &str) -> Option<String> {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    // On macOS, GUI apps don't inherit shell PATH — try user's login shell to resolve
+    #[cfg(target_os = "macos")]
+    {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        if let Ok(output) = Command::new(&shell)
+            .arg("-l")
+            .arg("-c")
+            .arg(format!("which {}", name))
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() && Path::new(&path).exists() {
                     return Some(path);
                 }
             }
