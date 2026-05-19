@@ -102,8 +102,14 @@ pub fn check_dependencies() -> Result<DependencyCheckResult, String> {
 pub async fn install_dependencies(tools: Vec<String>) -> Result<Vec<String>, String> {
     let platform = detect_platform();
     let mut results = Vec::new();
+    // Whitelist of allowed tool names to prevent command injection
+    let allowed_tools = ["ffmpeg", "ffprobe", "yt-dlp"];
 
     for tool in &tools {
+        if !allowed_tools.contains(&tool.as_str()) {
+            results.push(format!("{}: 不支援的工具名稱", tool));
+            continue;
+        }
         let result = install_tool(&platform, tool);
         results.push(result);
     }
@@ -161,7 +167,7 @@ fn install_tool_macos(tool: &str) -> String {
             if !has_brew {
                 // Try pip as fallback
                 let pip_result = Command::new("pip3")
-                    .args(["install", "--upgrade", "yt-dlp"])
+                    .args(["install", "--upgrade", "--user", "yt-dlp"])
                     .output();
                 match pip_result {
                     Ok(out) if out.status.success() => {
@@ -273,7 +279,7 @@ fn install_tool_windows(tool: &str) -> String {
             } else {
                 // Try pip as fallback on Windows
                 let pip_result = Command::new("pip")
-                    .args(["install", "--upgrade", "yt-dlp"])
+                    .args(["install", "--upgrade", "--user", "yt-dlp"])
                     .output();
                 match pip_result {
                     Ok(out) if out.status.success() => format!("{}: 透過 pip 安裝/更新成功", tool),
@@ -325,7 +331,7 @@ fn install_tool_linux(tool: &str) -> String {
         "yt-dlp" => {
             // pip3 is the most universal way on Linux
             let pip_result = Command::new("pip3")
-                .args(["install", "--upgrade", "yt-dlp"])
+                .args(["install", "--upgrade", "--user", "yt-dlp"])
                 .output();
             match pip_result {
                 Ok(out) if out.status.success() => format!("{}: 透過 pip3 安裝/更新成功", tool),
@@ -389,18 +395,13 @@ pub fn find_tool_path(name: &str) -> Option<String> {
     }
 
     // Final attempt: check if it's in the system PATH
-    #[cfg(target_os = "windows")]
-    let version_arg = "--version";
-    #[cfg(not(target_os = "windows"))]
-    let version_arg = "--version";
-
     let cmd_name = if cfg!(target_os = "windows") && !name.ends_with(".exe") {
         format!("{}.exe", name)
     } else {
         name.to_string()
     };
 
-    if let Ok(output) = Command::new(&cmd_name).arg(version_arg).output() {
+    if let Ok(output) = Command::new(&cmd_name).arg("--version").output() {
         if output.status.success() || !output.stdout.is_empty() {
             return Some(name.to_string());
         }

@@ -101,7 +101,7 @@
           const ytdlp = result.dependencies.find((d: any) => d.name === "yt-dlp");
           if (ytdlp && ytdlp.installed) {
             // Silently attempt to update yt-dlp in background
-            invoke("install_dependencies", { tools: ["yt-dlp"] }).catch(() => {});
+            invoke("install_dependencies", { tools: ["yt-dlp"] }).catch((e) => console.error("Background yt-dlp update failed:", e));
           }
         }
       }
