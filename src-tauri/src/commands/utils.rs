@@ -4,6 +4,23 @@ use tauri::AppHandle;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use serde::Serialize;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+/// Windows API CREATE_NO_WINDOW flag — prevents spawned processes from creating a visible console window.
+/// See: https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Create a Command that hides the console window on Windows.
+pub fn hidden_cmd(program: &str) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(program);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
 #[derive(Serialize, Clone)]
 pub struct DependencyStatus {
     pub name: String,
@@ -34,9 +51,9 @@ fn detect_platform() -> String {
 /// Get the version string of an installed tool.
 fn get_tool_version(tool_path: &str, tool_name: &str) -> String {
     let output = match tool_name {
-        "ffmpeg" | "ffprobe" => Command::new(tool_path).arg("-version").output(),
-        "yt-dlp" => Command::new(tool_path).arg("--version").output(),
-        _ => Command::new(tool_path).arg("--version").output(),
+        "ffmpeg" | "ffprobe" => hidden_cmd(tool_path).arg("-version").output(),
+        "yt-dlp" => hidden_cmd(tool_path).arg("--version").output(),
+        _ => hidden_cmd(tool_path).arg("--version").output(),
     };
 
     match output {
@@ -129,7 +146,7 @@ fn install_tool(platform: &str, tool: &str) -> String {
 
 fn install_tool_macos(tool: &str) -> String {
     // Check if Homebrew is available
-    let has_brew = Command::new("brew").arg("--version").output().is_ok();
+    let has_brew = hidden_cmd("brew").arg("--version").output().is_ok();
 
     match tool {
         "ffmpeg" | "ffprobe" => {
@@ -141,9 +158,9 @@ fn install_tool_macos(tool: &str) -> String {
             let is_installed = find_tool_path("ffmpeg").is_some();
 
             let output = if is_installed {
-                Command::new("brew").args(["upgrade", pkg]).output()
+                hidden_cmd("brew").args(["upgrade", pkg]).output()
             } else {
-                Command::new("brew").args(["install", pkg]).output()
+                hidden_cmd("brew").args(["install", pkg]).output()
             };
 
             match output {
@@ -166,7 +183,7 @@ fn install_tool_macos(tool: &str) -> String {
         "yt-dlp" => {
             if !has_brew {
                 // Try pip as fallback
-                let pip_result = Command::new("pip3")
+                let pip_result = hidden_cmd("pip3")
                     .args(["install", "--upgrade", "--user", "yt-dlp"])
                     .output();
                 match pip_result {
@@ -180,9 +197,9 @@ fn install_tool_macos(tool: &str) -> String {
             }
             let is_installed = find_tool_path("yt-dlp").is_some();
             let output = if is_installed {
-                Command::new("brew").args(["upgrade", "yt-dlp"]).output()
+                hidden_cmd("brew").args(["upgrade", "yt-dlp"]).output()
             } else {
-                Command::new("brew").args(["install", "yt-dlp"]).output()
+                hidden_cmd("brew").args(["install", "yt-dlp"]).output()
             };
 
             match output {
@@ -208,20 +225,20 @@ fn install_tool_macos(tool: &str) -> String {
 
 fn install_tool_windows(tool: &str) -> String {
     // Check if winget is available
-    let has_winget = Command::new("winget").arg("--version").output().is_ok();
+    let has_winget = hidden_cmd("winget").arg("--version").output().is_ok();
     // Check if choco is available
-    let has_choco = Command::new("choco").arg("--version").output().is_ok();
+    let has_choco = hidden_cmd("choco").arg("--version").output().is_ok();
 
     match tool {
         "ffmpeg" | "ffprobe" => {
             if has_winget {
                 let is_installed = find_tool_path("ffmpeg").is_some();
                 let output = if is_installed {
-                    Command::new("winget")
+                    hidden_cmd("winget")
                         .args(["upgrade", "--id", "Gyan.FFmpeg", "--accept-source-agreements", "--accept-package-agreements"])
                         .output()
                 } else {
-                    Command::new("winget")
+                    hidden_cmd("winget")
                         .args(["install", "--id", "Gyan.FFmpeg", "--accept-source-agreements", "--accept-package-agreements"])
                         .output()
                 };
@@ -240,9 +257,9 @@ fn install_tool_windows(tool: &str) -> String {
             } else if has_choco {
                 let is_installed = find_tool_path("ffmpeg").is_some();
                 let output = if is_installed {
-                    Command::new("choco").args(["upgrade", "ffmpeg", "-y"]).output()
+                    hidden_cmd("choco").args(["upgrade", "ffmpeg", "-y"]).output()
                 } else {
-                    Command::new("choco").args(["install", "ffmpeg", "-y"]).output()
+                    hidden_cmd("choco").args(["install", "ffmpeg", "-y"]).output()
                 };
                 match output {
                     Ok(out) if out.status.success() => format!("{}: 透過 choco 安裝/更新成功", tool),
@@ -256,11 +273,11 @@ fn install_tool_windows(tool: &str) -> String {
             if has_winget {
                 let is_installed = find_tool_path("yt-dlp").is_some();
                 let output = if is_installed {
-                    Command::new("winget")
+                    hidden_cmd("winget")
                         .args(["upgrade", "--id", "yt-dlp.yt-dlp", "--accept-source-agreements", "--accept-package-agreements"])
                         .output()
                 } else {
-                    Command::new("winget")
+                    hidden_cmd("winget")
                         .args(["install", "--id", "yt-dlp.yt-dlp", "--accept-source-agreements", "--accept-package-agreements"])
                         .output()
                 };
@@ -278,7 +295,7 @@ fn install_tool_windows(tool: &str) -> String {
                 }
             } else {
                 // Try pip as fallback on Windows
-                let pip_result = Command::new("pip")
+                let pip_result = hidden_cmd("pip")
                     .args(["install", "--upgrade", "--user", "yt-dlp"])
                     .output();
                 match pip_result {
@@ -293,15 +310,15 @@ fn install_tool_windows(tool: &str) -> String {
 
 fn install_tool_linux(tool: &str) -> String {
     // Detect package manager
-    let has_apt = Command::new("apt").arg("--version").output().is_ok();
-    let has_dnf = Command::new("dnf").arg("--version").output().is_ok();
-    let has_pacman = Command::new("pacman").arg("--version").output().is_ok();
+    let has_apt = hidden_cmd("apt").arg("--version").output().is_ok();
+    let has_dnf = hidden_cmd("dnf").arg("--version").output().is_ok();
+    let has_pacman = hidden_cmd("pacman").arg("--version").output().is_ok();
 
     match tool {
         "ffmpeg" | "ffprobe" => {
             if has_apt {
                 // Try without sudo first, then suggest sudo
-                let output = Command::new("pkexec")
+                let output = hidden_cmd("pkexec")
                     .args(["apt", "install", "-y", "ffmpeg"])
                     .output();
                 match output {
@@ -309,7 +326,7 @@ fn install_tool_linux(tool: &str) -> String {
                     _ => format!("{}: 請在終端執行 'sudo apt install -y ffmpeg'", tool),
                 }
             } else if has_dnf {
-                let output = Command::new("pkexec")
+                let output = hidden_cmd("pkexec")
                     .args(["dnf", "install", "-y", "ffmpeg"])
                     .output();
                 match output {
@@ -317,7 +334,7 @@ fn install_tool_linux(tool: &str) -> String {
                     _ => format!("{}: 請在終端執行 'sudo dnf install -y ffmpeg'", tool),
                 }
             } else if has_pacman {
-                let output = Command::new("pkexec")
+                let output = hidden_cmd("pkexec")
                     .args(["pacman", "-S", "--noconfirm", "ffmpeg"])
                     .output();
                 match output {
@@ -330,7 +347,7 @@ fn install_tool_linux(tool: &str) -> String {
         }
         "yt-dlp" => {
             // pip3 is the most universal way on Linux
-            let pip_result = Command::new("pip3")
+            let pip_result = hidden_cmd("pip3")
                 .args(["install", "--upgrade", "--user", "yt-dlp"])
                 .output();
             match pip_result {
@@ -338,7 +355,7 @@ fn install_tool_linux(tool: &str) -> String {
                 _ => {
                     // Try package manager as fallback
                     if has_apt {
-                        let output = Command::new("pkexec")
+                        let output = hidden_cmd("pkexec")
                             .args(["apt", "install", "-y", "yt-dlp"])
                             .output();
                         match output {
@@ -401,7 +418,7 @@ pub fn find_tool_path(name: &str) -> Option<String> {
         name.to_string()
     };
 
-    if let Ok(output) = Command::new(&cmd_name).arg("--version").output() {
+    if let Ok(output) = hidden_cmd(&cmd_name).arg("--version").output() {
         if output.status.success() || !output.stdout.is_empty() {
             return Some(name.to_string());
         }
@@ -410,7 +427,7 @@ pub fn find_tool_path(name: &str) -> Option<String> {
     // On Unix, also try `which`
     #[cfg(not(target_os = "windows"))]
     {
-        if let Ok(output) = Command::new("which").arg(name).output() {
+        if let Ok(output) = hidden_cmd("which").arg(name).output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
@@ -423,7 +440,7 @@ pub fn find_tool_path(name: &str) -> Option<String> {
     // On Windows, also try `where`
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = Command::new("where").arg(name).output() {
+        if let Ok(output) = hidden_cmd("where").arg(name).output() {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout)
                     .lines()
