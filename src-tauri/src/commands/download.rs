@@ -1,10 +1,10 @@
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::io::{BufRead, BufReader};
 use tauri::{AppHandle, Emitter};
 use serde::Serialize;
 use serde_json::Value;
 use regex::Regex;
-use crate::commands::utils::find_tool_path;
+use crate::commands::utils::{find_tool_path, hidden_cmd};
 
 #[derive(Serialize, Clone)]
 pub struct ProgressPayload {
@@ -17,7 +17,7 @@ pub struct ProgressPayload {
 pub async fn fetch_video_info(url: String) -> Result<String, String> {
     let yt_dlp_path = find_tool_path("yt-dlp").ok_or("yt-dlp not found")?;
     
-    let output = Command::new(&yt_dlp_path)
+    let output = hidden_cmd(&yt_dlp_path)
         .arg("--dump-json")
         .arg("--no-playlist")
         .arg("--flat-playlist")
@@ -62,7 +62,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     let temp_output = target_dir.join(format!("{}.tmp.mp4", temp_id));
     let temp_output_str = temp_output.to_string_lossy().to_string();
 
-    let mut child = Command::new(&yt_dlp_path)
+    let mut child = hidden_cmd(&yt_dlp_path)
         .arg("--newline")
         .arg("--progress")
         .arg("--no-check-certificates")
@@ -112,7 +112,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     // Since we forced -o with a specific tmp name, it should be exactly that.
     
     // Step 2: Get the intended title for the final file
-    let output = Command::new(&yt_dlp_path)
+    let output = hidden_cmd(&yt_dlp_path)
         .arg("--get-filename")
         .arg("-o")
         .arg("%(title)s.mp4") // Force .mp4 extension for final
@@ -137,7 +137,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         speed: "正在進行相容性優化...".to_string(),
     });
 
-    let ffmpeg_status = Command::new(&ffmpeg_path)
+    let ffmpeg_status = hidden_cmd(&ffmpeg_path)
         .arg("-y") // Overwrite if exists
         .arg("-i")
         .arg(&temp_output_str)
@@ -187,7 +187,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
 pub async fn open_folder(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        Command::new("open")
+        hidden_cmd("open")
             .arg("-R")
             .arg(path)
             .spawn()

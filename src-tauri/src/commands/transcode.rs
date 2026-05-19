@@ -1,11 +1,11 @@
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use tauri::{AppHandle, Emitter};
 use serde::{Serialize, Deserialize};
 use regex::Regex;
 use tauri_plugin_notification::NotificationExt;
-use crate::commands::utils::find_tool_path;
+use crate::commands::utils::{find_tool_path, hidden_cmd};
 
 #[derive(Serialize, Clone)]
 pub struct TranscodeProgress {
@@ -41,7 +41,7 @@ pub async fn transcode_video(
     }
 
     println!("Step 1: Fetching duration with ffprobe...");
-    let duration_output = Command::new(&ffprobe_path)
+    let duration_output = hidden_cmd(&ffprobe_path)
         .args(&[
             "-v", "error",
             "-show_entries", "format=duration",
@@ -89,7 +89,7 @@ pub async fn transcode_video(
     args.push(output_path.clone());
     println!("Step 2: Starting ffmpeg with args: {:?}", args);
 
-    let mut child = Command::new(&ffmpeg_path)
+    let mut child = hidden_cmd(&ffmpeg_path)
         .args(&args)
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
