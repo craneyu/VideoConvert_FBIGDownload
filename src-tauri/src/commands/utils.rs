@@ -538,7 +538,25 @@ pub fn find_tool_path(name: &str) -> Option<String> {
                 "{}\\Microsoft\\WinGet\\Links\\{}.exe",
                 local_app_data, name
             ));
-            paths.push(format!("{}\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-7.1.1-full_build\\bin\\{}.exe", local_app_data, name));
+            // Try to find ffmpeg in winget packages directory (version-agnostic)
+            let winget_pkg_dir = format!("{}\\Microsoft\\WinGet\\Packages", local_app_data);
+            if let Ok(entries) = std::fs::read_dir(&winget_pkg_dir) {
+                for entry in entries.flatten() {
+                    let entry_name = entry.file_name().to_string_lossy().to_string();
+                    if entry_name.starts_with("Gyan.FFmpeg") {
+                        // Look for bin directory inside any subdirectory
+                        if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
+                            for sub_entry in sub_entries.flatten() {
+                                let bin_path =
+                                    sub_entry.path().join("bin").join(format!("{}.exe", name));
+                                if bin_path.exists() {
+                                    paths.push(bin_path.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
         if let Ok(user_profile) = std::env::var("USERPROFILE") {
             // scoop install path
