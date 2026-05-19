@@ -113,6 +113,7 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::update_setting,
             commands::utils::check_dependencies,
+            commands::utils::install_dependencies,
             commands::utils::read_clipboard_text
         ])
         .run(tauri::generate_context!())
