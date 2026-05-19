@@ -8,10 +8,13 @@ use serde::Serialize;
 use std::os::windows::process::CommandExt;
 
 #[cfg(target_os = "windows")]
+/// Windows API CREATE_NO_WINDOW flag — prevents spawned processes from creating a visible console window.
+/// See: https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Create a Command that hides the console window on Windows.
 pub fn hidden_cmd(program: &str) -> Command {
+    #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);

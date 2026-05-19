@@ -1,7 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
   import Database from "@tauri-apps/plugin-sql";
   import { downloadDir } from "@tauri-apps/api/path";
   import { open } from "@tauri-apps/plugin-dialog";
@@ -109,9 +108,6 @@
     } catch (e) {
       console.error("Dependency check failed:", e);
     }
-
-    // Show the main window after dependencies are handled
-    await getCurrentWindow().show();
 
     // Progress Listeners
     const unlistenDl = await listen("download-progress", (event: any) => {
