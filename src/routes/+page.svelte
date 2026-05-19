@@ -372,6 +372,10 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
     addDownloadTask();
   }
 
+  function handleDragOver(event: DragEvent) {
+    event.preventDefault();
+  }
+
   function setPreset(p: string) {
     globalOptions.preset = p;
     globalOptions.codec = "h264";

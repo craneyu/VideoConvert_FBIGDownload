@@ -1,8 +1,8 @@
-use std::process::Command;
+use serde::Serialize;
 use std::path::Path;
+use std::process::Command;
 use tauri::AppHandle;
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use serde::Serialize;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -65,11 +65,7 @@ fn get_tool_version(tool_path: &str, tool_name: &str) -> String {
                     stdout
                         .lines()
                         .next()
-                        .and_then(|line| {
-                            line.split_whitespace()
-                                .nth(2)
-                                .map(|v| v.to_string())
-                        })
+                        .and_then(|line| line.split_whitespace().nth(2).map(|v| v.to_string()))
                         .unwrap_or_else(|| "unknown".to_string())
                 }
                 "yt-dlp" => {
@@ -174,7 +170,11 @@ fn install_tool_macos(tool: &str) -> String {
                         }
                     } else {
                         let err = String::from_utf8_lossy(&out.stderr).to_string();
-                        format!("{}: 安裝失敗 - {}", tool, err.lines().last().unwrap_or("unknown error"))
+                        format!(
+                            "{}: 安裝失敗 - {}",
+                            tool,
+                            err.lines().last().unwrap_or("unknown error")
+                        )
                     }
                 }
                 Err(e) => format!("{}: 執行失敗 - {}", tool, e),
@@ -213,7 +213,11 @@ fn install_tool_macos(tool: &str) -> String {
                         }
                     } else {
                         let err = String::from_utf8_lossy(&out.stderr).to_string();
-                        format!("{}: 安裝失敗 - {}", tool, err.lines().last().unwrap_or("unknown error"))
+                        format!(
+                            "{}: 安裝失敗 - {}",
+                            tool,
+                            err.lines().last().unwrap_or("unknown error")
+                        )
                     }
                 }
                 Err(e) => format!("{}: 執行失敗 - {}", tool, e),
@@ -223,11 +227,49 @@ fn install_tool_macos(tool: &str) -> String {
     }
 }
 
+/// Check if winget output (combined stdout + stderr) indicates a successful or already-up-to-date result.
+fn is_winget_success(out: &std::process::Output) -> bool {
+    if out.status.success() {
+        return true;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let combined = format!("{} {}", stdout, stderr);
+    // winget returns non-zero for "no applicable update" or "already installed"
+    combined.contains("No available upgrade")
+        || combined.contains("No newer package versions")
+        || combined.contains("already installed")
+        || combined.contains("No applicable update")
+        || combined.contains("Successfully installed")
+        || combined.contains("Found an existing package")
+}
+
+/// Extract a user-friendly error message from winget output.
+fn winget_error_message(out: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let combined = format!("{}\n{}", stdout, stderr);
+    combined
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .unwrap_or("unknown error")
+        .to_string()
+}
+
 fn install_tool_windows(tool: &str) -> String {
-    // Check if winget is available
-    let has_winget = hidden_cmd("winget").arg("--version").output().is_ok();
+    // Check if winget is available (verify it actually runs, not just exists)
+    let has_winget = hidden_cmd("winget")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success() || !o.stdout.is_empty())
+        .unwrap_or(false);
     // Check if choco is available
-    let has_choco = hidden_cmd("choco").arg("--version").output().is_ok();
+    let has_choco = hidden_cmd("choco")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
     match tool {
         "ffmpeg" | "ffprobe" => {
@@ -235,38 +277,98 @@ fn install_tool_windows(tool: &str) -> String {
                 let is_installed = find_tool_path("ffmpeg").is_some();
                 let output = if is_installed {
                     hidden_cmd("winget")
-                        .args(["upgrade", "--id", "Gyan.FFmpeg", "--accept-source-agreements", "--accept-package-agreements"])
+                        .args([
+                            "upgrade",
+                            "--id",
+                            "Gyan.FFmpeg",
+                            "--accept-source-agreements",
+                            "--accept-package-agreements",
+                            "--disable-interactivity",
+                        ])
                         .output()
                 } else {
                     hidden_cmd("winget")
-                        .args(["install", "--id", "Gyan.FFmpeg", "--accept-source-agreements", "--accept-package-agreements"])
+                        .args([
+                            "install",
+                            "--id",
+                            "Gyan.FFmpeg",
+                            "--accept-source-agreements",
+                            "--accept-package-agreements",
+                            "--disable-interactivity",
+                        ])
                         .output()
                 };
                 match output {
-                    Ok(out) if out.status.success() => format!("{}: 透過 winget 安裝/更新成功", tool),
-                    Ok(out) => {
-                        let msg = String::from_utf8_lossy(&out.stdout).to_string();
-                        if msg.contains("No available upgrade") || msg.contains("already installed") {
+                    Ok(out) if is_winget_success(&out) => {
+                        let combined = format!(
+                            "{} {}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                        if combined.contains("No available upgrade")
+                            || combined.contains("No newer package versions")
+                            || combined.contains("already installed")
+                        {
                             format!("{}: 已是最新版本", tool)
                         } else {
-                            format!("{}: winget 安裝失敗，請手動安裝", tool)
+                            format!("{}: 透過 winget 安裝/更新成功", tool)
                         }
                     }
-                    Err(_) => format!("{}: winget 執行失敗", tool),
+                    Ok(out) => {
+                        let err = winget_error_message(&out);
+                        // Fallback to choco if winget fails
+                        if has_choco {
+                            let choco_out = if is_installed {
+                                hidden_cmd("choco")
+                                    .args(["upgrade", "ffmpeg", "-y"])
+                                    .output()
+                            } else {
+                                hidden_cmd("choco")
+                                    .args(["install", "ffmpeg", "-y"])
+                                    .output()
+                            };
+                            match choco_out {
+                                Ok(o) if o.status.success() => {
+                                    format!("{}: 透過 choco 安裝/更新成功", tool)
+                                }
+                                _ => format!("{}: winget 安裝失敗 ({})", tool, err),
+                            }
+                        } else {
+                            format!("{}: winget 安裝失敗 ({})", tool, err)
+                        }
+                    }
+                    Err(e) => format!("{}: winget 執行失敗 - {}", tool, e),
                 }
             } else if has_choco {
                 let is_installed = find_tool_path("ffmpeg").is_some();
                 let output = if is_installed {
-                    hidden_cmd("choco").args(["upgrade", "ffmpeg", "-y"]).output()
+                    hidden_cmd("choco")
+                        .args(["upgrade", "ffmpeg", "-y"])
+                        .output()
                 } else {
-                    hidden_cmd("choco").args(["install", "ffmpeg", "-y"]).output()
+                    hidden_cmd("choco")
+                        .args(["install", "ffmpeg", "-y"])
+                        .output()
                 };
                 match output {
-                    Ok(out) if out.status.success() => format!("{}: 透過 choco 安裝/更新成功", tool),
-                    _ => format!("{}: choco 安裝失敗", tool),
+                    Ok(out) if out.status.success() => {
+                        format!("{}: 透過 choco 安裝/更新成功", tool)
+                    }
+                    Ok(out) => {
+                        let err = String::from_utf8_lossy(&out.stderr).to_string();
+                        format!(
+                            "{}: choco 安裝失敗 - {}",
+                            tool,
+                            err.lines().last().unwrap_or("unknown error")
+                        )
+                    }
+                    Err(e) => format!("{}: choco 執行失敗 - {}", tool, e),
                 }
             } else {
-                format!("{}: 需要先安裝 winget 或 Chocolatey", tool)
+                format!(
+                    "{}: 需要先安裝 winget 或 Chocolatey。請以系統管理員身份開啟終端機並執行安裝",
+                    tool
+                )
             }
         }
         "yt-dlp" => {
@@ -274,24 +376,57 @@ fn install_tool_windows(tool: &str) -> String {
                 let is_installed = find_tool_path("yt-dlp").is_some();
                 let output = if is_installed {
                     hidden_cmd("winget")
-                        .args(["upgrade", "--id", "yt-dlp.yt-dlp", "--accept-source-agreements", "--accept-package-agreements"])
+                        .args([
+                            "upgrade",
+                            "--id",
+                            "yt-dlp.yt-dlp",
+                            "--accept-source-agreements",
+                            "--accept-package-agreements",
+                            "--disable-interactivity",
+                        ])
                         .output()
                 } else {
                     hidden_cmd("winget")
-                        .args(["install", "--id", "yt-dlp.yt-dlp", "--accept-source-agreements", "--accept-package-agreements"])
+                        .args([
+                            "install",
+                            "--id",
+                            "yt-dlp.yt-dlp",
+                            "--accept-source-agreements",
+                            "--accept-package-agreements",
+                            "--disable-interactivity",
+                        ])
                         .output()
                 };
                 match output {
-                    Ok(out) if out.status.success() => format!("{}: 透過 winget 安裝/更新成功", tool),
-                    Ok(out) => {
-                        let msg = String::from_utf8_lossy(&out.stdout).to_string();
-                        if msg.contains("No available upgrade") || msg.contains("already installed") {
+                    Ok(out) if is_winget_success(&out) => {
+                        let combined = format!(
+                            "{} {}",
+                            String::from_utf8_lossy(&out.stdout),
+                            String::from_utf8_lossy(&out.stderr)
+                        );
+                        if combined.contains("No available upgrade")
+                            || combined.contains("No newer package versions")
+                            || combined.contains("already installed")
+                        {
                             format!("{}: 已是最新版本", tool)
                         } else {
-                            format!("{}: winget 安裝失敗，請手動安裝", tool)
+                            format!("{}: 透過 winget 安裝/更新成功", tool)
                         }
                     }
-                    Err(_) => format!("{}: winget 執行失敗", tool),
+                    Ok(out) => {
+                        let err = winget_error_message(&out);
+                        // Fallback to pip
+                        let pip_result = hidden_cmd("pip")
+                            .args(["install", "--upgrade", "--user", "yt-dlp"])
+                            .output();
+                        match pip_result {
+                            Ok(o) if o.status.success() => {
+                                format!("{}: 透過 pip 安裝/更新成功", tool)
+                            }
+                            _ => format!("{}: winget 安裝失敗 ({})", tool, err),
+                        }
+                    }
+                    Err(e) => format!("{}: winget 執行失敗 - {}", tool, e),
                 }
             } else {
                 // Try pip as fallback on Windows
@@ -338,7 +473,9 @@ fn install_tool_linux(tool: &str) -> String {
                     .args(["pacman", "-S", "--noconfirm", "ffmpeg"])
                     .output();
                 match output {
-                    Ok(out) if out.status.success() => format!("{}: 透過 pacman 安裝/更新成功", tool),
+                    Ok(out) if out.status.success() => {
+                        format!("{}: 透過 pacman 安裝/更新成功", tool)
+                    }
                     _ => format!("{}: 請在終端執行 'sudo pacman -S ffmpeg'", tool),
                 }
             } else {
@@ -359,7 +496,9 @@ fn install_tool_linux(tool: &str) -> String {
                             .args(["apt", "install", "-y", "yt-dlp"])
                             .output();
                         match output {
-                            Ok(out) if out.status.success() => format!("{}: 透過 apt 安裝成功", tool),
+                            Ok(out) if out.status.success() => {
+                                format!("{}: 透過 apt 安裝成功", tool)
+                            }
                             _ => format!("{}: 請在終端執行 'pip3 install --upgrade yt-dlp'", tool),
                         }
                     } else {
@@ -374,9 +513,7 @@ fn install_tool_linux(tool: &str) -> String {
 
 #[tauri::command]
 pub fn read_clipboard_text(app: AppHandle) -> Result<String, String> {
-    app.clipboard()
-        .read_text()
-        .map_err(|e| e.to_string())
+    app.clipboard().read_text().map_err(|e| e.to_string())
 }
 
 pub fn find_tool_path(name: &str) -> Option<String> {
@@ -389,11 +526,56 @@ pub fn find_tool_path(name: &str) -> Option<String> {
     ];
 
     #[cfg(target_os = "windows")]
-    let common_paths = vec![
-        format!("C:\\ProgramData\\chocolatey\\bin\\{}.exe", name),
-        format!("C:\\Program Files\\ffmpeg\\bin\\{}.exe", name),
-        format!("C:\\ffmpeg\\bin\\{}.exe", name),
-    ];
+    let common_paths = {
+        let mut paths = vec![
+            format!("C:\\ProgramData\\chocolatey\\bin\\{}.exe", name),
+            format!("C:\\Program Files\\ffmpeg\\bin\\{}.exe", name),
+            format!("C:\\ffmpeg\\bin\\{}.exe", name),
+        ];
+        // Add user-specific winget/scoop paths
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            paths.push(format!(
+                "{}\\Microsoft\\WinGet\\Links\\{}.exe",
+                local_app_data, name
+            ));
+            // Try to find ffmpeg in winget packages directory (version-agnostic)
+            let winget_pkg_dir = format!("{}\\Microsoft\\WinGet\\Packages", local_app_data);
+            if let Ok(entries) = std::fs::read_dir(&winget_pkg_dir) {
+                for entry in entries.flatten() {
+                    let entry_name = entry.file_name().to_string_lossy().to_string();
+                    if entry_name.starts_with("Gyan.FFmpeg") {
+                        // Look for bin directory inside any subdirectory
+                        if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
+                            for sub_entry in sub_entries.flatten() {
+                                let bin_path =
+                                    sub_entry.path().join("bin").join(format!("{}.exe", name));
+                                if bin_path.exists() {
+                                    paths.push(bin_path.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Ok(user_profile) = std::env::var("USERPROFILE") {
+            // scoop install path
+            paths.push(format!("{}\\scoop\\shims\\{}.exe", user_profile, name));
+            // pip --user install path for yt-dlp
+            paths.push(format!(
+                "{}\\AppData\\Roaming\\Python\\Scripts\\{}.exe",
+                user_profile, name
+            ));
+            paths.push(format!(
+                "{}\\AppData\\Local\\Programs\\Python\\Scripts\\{}.exe",
+                user_profile, name
+            ));
+        }
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            paths.push(format!("{}\\ffmpeg\\bin\\{}.exe", program_files, name));
+        }
+        paths
+    };
 
     #[cfg(target_os = "linux")]
     let common_paths = vec![
