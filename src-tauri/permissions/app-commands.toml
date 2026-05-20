@@ -1,0 +1,17 @@
+[[permission]]
+identifier = "allow-app-commands"
+description = "Allow all custom application commands"
+
+[permission.commands]
+allow = [
+    "greet",
+    "fetch_video_info",
+    "download_video",
+    "open_folder",
+    "transcode_video",
+    "get_settings",
+    "update_setting",
+    "check_dependencies",
+    "install_dependencies",
+    "read_clipboard_text"
+]

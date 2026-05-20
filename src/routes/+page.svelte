@@ -309,7 +309,8 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
 
   function addTranscodeTask(path: string) {
     console.log("Adding transcode task for path:", path);
-    const fileName = path.split('/').pop() || path;
+    // Handle both forward and backward slashes for cross-platform compatibility
+    const fileName = path.split(/[/\\]/).pop() || path;
     const newTask: TranscodeTask = {
       id: Math.random().toString(36).substring(7),
       inputPath: path,

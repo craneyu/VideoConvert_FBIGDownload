@@ -5,6 +5,9 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "log:default",
+    "clipboard-manager:default",
+    "allow-app-commands",
     "opener:default",
     "dialog:default",
     "notification:default",
