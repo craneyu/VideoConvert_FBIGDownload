@@ -536,4 +536,50 @@ mod tests {
         let raw = r#"{"streams":[{"codec_type":"video","codec_name":"h264"}]}"#;
         assert_eq!(parse_probe_json(raw), None);
     }
+
+    /// Verbatim output of the command `probe_media` builds, captured from
+    /// ffprobe 8.0 on macOS:
+    ///
+    /// ffprobe -v error -print_format json \
+    ///   -show_entries stream=codec_type,codec_name,width,height <file>
+    ///
+    /// Hand-written fixtures cannot catch a change in ffprobe's actual response
+    /// shape. If this ever stops parsing, `plan_post_processing` silently falls
+    /// back to re-encoding every download while every other test stays green —
+    /// so the real payload is pinned here, including the sibling keys ffprobe
+    /// emits alongside `streams`.
+    const REAL_FFPROBE_OUTPUT: &str = r#"{
+    "programs": [
+
+    ],
+    "stream_groups": [
+
+    ],
+    "streams": [
+        {
+            "codec_name": "h264",
+            "codec_type": "video",
+            "width": 640,
+            "height": 480
+        },
+        {
+            "codec_name": "aac",
+            "codec_type": "audio"
+        }
+    ]
+}"#;
+
+    #[test]
+    fn parses_real_ffprobe_output() {
+        let parsed = parse_probe_json(REAL_FFPROBE_OUTPUT).expect("real ffprobe output must parse");
+        assert_eq!(parsed, probe("h264", Some("aac"), 640, 480));
+    }
+
+    #[test]
+    fn real_ffprobe_output_is_planned_as_remux() {
+        // The end-to-end point of task 6.3: a real H.264/AAC file must take the
+        // remux path, not fall back to re-encoding.
+        let parsed = parse_probe_json(REAL_FFPROBE_OUTPUT).expect("real ffprobe output must parse");
+        assert_eq!(plan_post_processing(Some(&parsed)), PostProcessPlan::Remux);
+    }
 }

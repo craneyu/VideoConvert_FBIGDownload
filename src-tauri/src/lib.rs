@@ -62,6 +62,15 @@ pub fn run() {
                         // datetime(created_at, 'localtime') reads the stored value as
                         // UTC and converts it using the host's zone, so this is correct
                         // outside UTC+8 as well.
+                        //
+                        // The four statements below rely on two guarantees verified in
+                        // sqlx 0.8.6, which backs this plugin:
+                        //   - Executor::execute delegates to execute_many, so every
+                        //     statement in this string runs, not just the first.
+                        //   - The migrator wraps the script and its version bookkeeping
+                        //     in one transaction, so a failure part-way rolls the whole
+                        //     thing back and version 3 is not recorded. There is no
+                        //     half-applied state to recover from.
                         tauri_plugin_sql::Migration {
                             version: 3,
                             description: "store download_history.created_at in local time",
