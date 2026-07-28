@@ -1,9 +1,13 @@
 name: "publish"
 
+# Triggered by version tags, not by every push to main. Pushing to main used to
+# rerun a three-platform build (~10 minutes) and re-upload assets onto the release
+# that the unchanged version number already resolved to.
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
 
 jobs:
   publish-tauri:
@@ -52,7 +56,21 @@ jobs:
         with:
           tagName: v__VERSION__ # tauri-action replaces this with the app version from tauri.conf.json
           releaseName: "VidBridge v__VERSION__"
-          releaseBody: "See the assets below to download the latest version of VidBridge."
-          releaseDraft: true
+          releaseBody: |
+            See the assets below to download the latest version of VidBridge.
+
+            ---
+
+            ### ⚠️ 既有 0.1.3 使用者請注意
+
+            本版更換了更新簽章金鑰。舊版內嵌的是舊公鑰，無法驗證新版簽章，因此
+            **無法透過自動更新升級** —— 請從下方資產手動下載安裝一次，之後的自動
+            更新就會恢復正常。
+
+            （0.1.3 及之前的自動更新因設定錯誤本來就無法運作，此次更換不會讓任何
+            原本可用的功能失效。）
+          # Must not be a draft or prerelease: the updater endpoint resolves through
+          # /releases/latest/download/, which skips both.
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
