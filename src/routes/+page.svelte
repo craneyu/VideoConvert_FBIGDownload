@@ -759,8 +759,11 @@
                     onclick={() => openFile(item.file_path)} 
                     class="p-2.5 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 rounded-xl hover:bg-emerald-600 hover:text-white transition-all shadow-sm"
                     title="開啟檔案夾"
+                    aria-label="開啟檔案夾"
                   >
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 19l7-7 7 7M5 5l7 7 7-7"></path></svg>
+                    <!-- A folder. The previous icon was two stacked chevrons, which
+                         read as an "×" and gave no hint that it reveals the file. -->
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
                   </button>
                 {/if}
                 
