@@ -4,12 +4,20 @@ use tauri::State;
 use tauri_plugin_sql::{DbInstances, DbPool};
 use sqlx::Row;
 
+/// The only theme modes the frontend knows how to resolve. `update_setting` is a
+/// generic key-value writer with no per-key validation, so anything may end up in
+/// the database; treating this list as an allowlist on the way out keeps an
+/// unrecognised value from reaching the `data-theme` contract, which admits only
+/// "light" or "dark".
+const VALID_THEMES: [&str; 3] = ["system", "light", "dark"];
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub download_path: String,
     pub auto_organize: bool,
     pub transcoding_preset: String,
     pub detect_clipboard: bool,
+    pub theme: String,
 }
 
 impl Default for Settings {
@@ -23,6 +31,7 @@ impl Default for Settings {
             auto_organize: false,
             transcoding_preset: "Balanced".to_string(),
             detect_clipboard: true,
+            theme: "system".to_string(),
         }
     }
 }
@@ -41,6 +50,14 @@ impl Settings {
                 "detect_clipboard" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.detect_clipboard = b;
+                    }
+                }
+                // An unrecognised value is left alone rather than corrected in
+                // place: the default stands for this run, and nothing is written
+                // back to the database.
+                "theme" => {
+                    if VALID_THEMES.contains(&value.as_str()) {
+                        self.theme = value;
                     }
                 }
                 _ => {}
@@ -133,5 +150,37 @@ mod tests {
         // Kept default
         assert_eq!(merged.transcoding_preset, "Balanced");
         assert_eq!(merged.download_path, default_settings.download_path);
+    }
+
+    #[test]
+    fn test_theme_defaults_to_system() {
+        // "system" keeps the pre-existing behaviour of following the OS colour
+        // scheme, so upgrading an installation must not change what users see.
+        assert_eq!(Settings::default().theme, "system");
+    }
+
+    #[test]
+    fn test_theme_accepts_the_three_valid_modes() {
+        for value in ["system", "light", "dark"] {
+            let merged =
+                Settings::default().merge(vec![("theme".to_string(), value.to_string())]);
+            assert_eq!(merged.theme, value, "theme {:?} must be accepted", value);
+        }
+    }
+
+    #[test]
+    fn test_theme_falls_back_to_system_for_unrecognized_values() {
+        // A hand-edited database, or a mode a future version removed, must
+        // degrade to the default instead of reaching the DOM contract, which
+        // only ever allows "light" or "dark".
+        for value in ["", "sepia"] {
+            let merged =
+                Settings::default().merge(vec![("theme".to_string(), value.to_string())]);
+            assert_eq!(
+                merged.theme, "system",
+                "unrecognized theme {:?} must fall back to system",
+                value
+            );
+        }
     }
 }

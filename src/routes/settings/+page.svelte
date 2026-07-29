@@ -1,5 +1,6 @@
 <script lang="ts">
   import { settingsStore } from "$lib/stores/settings.svelte";
+  import type { ThemeMode } from "$lib/theme";
   import { open } from "@tauri-apps/plugin-dialog";
   import { fade, fly } from "svelte/transition";
 
@@ -28,6 +29,14 @@
     const target = e.target as HTMLSelectElement;
     settingsStore.update('transcoding_preset', target.value);
   }
+
+  // "跟隨系統" is first because it is the default, and the only option whose
+  // result depends on something outside the app.
+  const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
+    { value: 'system', label: '跟隨系統' },
+    { value: 'light', label: '淺色' },
+    { value: 'dark', label: '深色' }
+  ];
 </script>
 
 <!--
@@ -135,6 +144,13 @@
           </div>
         </section>
 
+        <!--
+          Transcoding and appearance sit side by side rather than stacked. Stacking
+          a third section pushed the page past one 800x600 screen, which the spacing
+          note above exists to prevent.
+        -->
+        <div class="grid grid-cols-2 gap-4">
+
         <!-- Transcoding Settings -->
         <section class="bg-white dark:bg-neutral-900 rounded-2xl p-5 shadow-sm border border-neutral-200/80 dark:border-neutral-800 transition-all hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-700">
           <h2 class="text-xs font-black uppercase tracking-widest text-neutral-400 mb-4 flex items-center gap-2">
@@ -160,6 +176,33 @@
             </div>
           </div>
         </section>
+
+        <!-- Appearance -->
+        <section class="bg-white dark:bg-neutral-900 rounded-2xl p-5 shadow-sm border border-neutral-200/80 dark:border-neutral-800 transition-all hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-700">
+          <h2 class="text-xs font-black uppercase tracking-widest text-neutral-400 mb-4 flex items-center gap-2">
+            <svg class="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828L13 15.657"></path></svg>
+            外觀
+          </h2>
+
+          <div class="space-y-1.5">
+            <p class="text-xs font-bold text-neutral-500 dark:text-neutral-400 ml-1">介面主題</p>
+            <div class="flex gap-1 p-1 bg-neutral-100 dark:bg-neutral-800/60 rounded-xl">
+              {#each THEME_OPTIONS as option (option.value)}
+                <button
+                  onclick={() => settingsStore.update('theme', option.value)}
+                  aria-pressed={settingsStore.settings.theme === option.value}
+                  class="flex-1 px-2 py-1.5 rounded-lg text-xs font-bold transition-all {settingsStore.settings.theme === option.value
+                    ? 'bg-white dark:bg-neutral-700 text-blue-600 dark:text-blue-400 shadow-sm'
+                    : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}"
+                >
+                  {option.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </section>
+
+        </div>
 
       </div>
     {:else}
