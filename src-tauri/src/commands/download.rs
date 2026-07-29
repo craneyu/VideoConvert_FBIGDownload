@@ -17,6 +17,12 @@ const STDERR_TAIL_LINES: usize = 20;
 const STATUS_REMUX: &str = "正在進行容器最佳化...";
 const STATUS_REENCODE: &str = "正在重新編碼以確保相容性...";
 
+/// The progress band reserved for post-processing. yt-dlp's own progress is
+/// mapped onto 0–90, and 95 is emitted once the plan is known.
+const POST_PROCESS_START: f64 = 95.0;
+/// Held just below 100 so completion stays the only thing that reports done.
+const POST_PROCESS_CEILING: f64 = 99.9;
+
 /// Byte budget for a single path component.
 ///
 /// macOS/APFS rejects components over 255 bytes with ENAMETOOLONG. We stay well
@@ -106,6 +112,81 @@ pub fn parse_probe_json(raw: &str) -> Option<ProbeResult> {
     })
 }
 
+/// Parse one line of ffmpeg's `-progress` stream into elapsed output seconds.
+///
+/// Only `out_time_us` is read. `out_time_ms` carries microseconds in several
+/// ffmpeg releases, so treating it as milliseconds overshoots by a factor of 1000,
+/// and `out_time` is a formatted timestamp that needs parsing of its own. Lines
+/// for other keys, and the `N/A` that appears before the first frame is written,
+/// yield `None`.
+pub fn parse_progress_out_time(line: &str) -> Option<f64> {
+    let micros: f64 = line.trim().strip_prefix("out_time_us=")?.trim().parse().ok()?;
+    (micros.is_finite() && micros >= 0.0).then_some(micros / 1_000_000.0)
+}
+
+/// Parse `ffprobe -show_entries format=duration -of csv=p=0` output.
+///
+/// `N/A` is what ffprobe prints when the container does not state a duration, and
+/// it must not become zero — a zero would make every progress value 95%.
+pub fn parse_duration_output(raw: &str) -> Option<f64> {
+    let seconds: f64 = raw.trim().parse().ok()?;
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
+/// Map elapsed output time onto the post-processing band.
+///
+/// Clamped at both ends: ffmpeg's final report can exceed the probed duration
+/// slightly, and an unknown duration reports the start of the band rather than a
+/// fabricated value.
+pub fn post_process_progress(out_time_secs: f64, duration_secs: f64) -> f64 {
+    if !(duration_secs > 0.0) {
+        return POST_PROCESS_START;
+    }
+    let ratio = (out_time_secs / duration_secs).clamp(0.0, 1.0);
+    (POST_PROCESS_START + ratio * (100.0 - POST_PROCESS_START)).min(POST_PROCESS_CEILING)
+}
+
+/// Does `file_name` look like the temporary download for `temp_id`?
+///
+/// The output template cannot pin the extension. yt-dlp names the file after the
+/// format it actually selected, so a YouTube source offering only VP9/Opus lands
+/// as `<id>.tmp.webm` — and when the template asked for `.mp4`, older yt-dlp
+/// appends its own extension instead, giving `<id>.tmp.mp4.webm`. Both shapes are
+/// accepted; matching on the prefix is what makes this independent of the format.
+///
+/// In-progress artefacts are excluded so a partial file is never handed to ffmpeg.
+pub fn is_temp_output(file_name: &str, temp_id: &str) -> bool {
+    file_name.starts_with(&format!("{}.tmp.", temp_id))
+        && !file_name.ends_with(".part")
+        && !file_name.ends_with(".ytdl")
+}
+
+/// Locate the file yt-dlp produced, whatever extension it chose.
+///
+/// Assuming `<id>.tmp.mp4` made ffprobe and ffmpeg read a path that does not
+/// exist: the download failed with "No such file or directory" after the bytes
+/// had already been fetched, and cleanup missed the real file, leaving a
+/// multi-gigabyte orphan in the download folder.
+///
+/// The largest match wins, so a leftover per-format fragment cannot be mistaken
+/// for the merged result.
+fn resolve_temp_output(dir: &std::path::Path, temp_id: &str) -> Option<std::path::PathBuf> {
+    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_temp_output(name, temp_id) {
+            continue;
+        }
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        match &best {
+            Some((best_size, _)) if size <= *best_size => {}
+            _ => best = Some((size, entry.path())),
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
 /// Decide between remuxing and re-encoding.
 ///
 /// Remuxing is only chosen when every whitelist condition holds: H.264 video,
@@ -155,6 +236,55 @@ fn probe_media(ffprobe_path: &str, path: &str) -> Option<ProbeResult> {
     parse_probe_json(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Read a file's duration in seconds, for turning ffmpeg's elapsed output time
+/// into a percentage. Kept separate from `probe_media` because that answers a
+/// different question — whether the streams are already compatible.
+fn probe_duration_secs(ffprobe_path: &str, path: &str) -> Option<f64> {
+    let output = hidden_cmd(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+    parse_duration_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Drain a reader into a bounded ring buffer of lines.
+///
+/// Splits on bytes rather than using `lines()`. `lines()` yields an error for any
+/// line that is not valid UTF-8, and `map_while(Result::ok)` ended the loop there:
+/// the drain thread exits while the child keeps writing, the pipe fills, and the
+/// child blocks forever — the very stall the draining exists to prevent. Windows
+/// makes that reachable, because tools write their messages in the console code
+/// page (cp950 on a Traditional Chinese install) rather than UTF-8.
+///
+/// Replacement characters in an error message are an acceptable outcome. A
+/// download that never finishes is not.
+fn drain_lines<R: std::io::Read>(reader: R, tail: &Arc<Mutex<VecDeque<String>>>) {
+    for chunk in BufReader::new(reader).split(b'\n') {
+        let Ok(bytes) = chunk else { break };
+        let line = String::from_utf8_lossy(&bytes)
+            .trim_end_matches('\r')
+            .to_string();
+        let mut buf = tail.lock().unwrap();
+        if buf.len() == STDERR_TAIL_LINES {
+            buf.pop_front();
+        }
+        buf.push_back(line);
+    }
+}
+
 /// Continuously drain a child's stderr into a bounded ring buffer.
 ///
 /// Draining matters as much as the content: an unread pipe fills up and blocks
@@ -164,15 +294,7 @@ fn spawn_stderr_collector(
 ) -> (Arc<Mutex<VecDeque<String>>>, std::thread::JoinHandle<()>) {
     let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
     let writer = Arc::clone(&tail);
-    let handle = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let mut buf = writer.lock().unwrap();
-            if buf.len() == STDERR_TAIL_LINES {
-                buf.pop_front();
-            }
-            buf.push_back(line);
-        }
-    });
+    let handle = std::thread::spawn(move || drain_lines(stderr, &writer));
     (tail, handle)
 }
 
@@ -227,19 +349,24 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .map_err(|e| format!("Failed to create directory: {}", e))?;
 
     // Step 1: Download using yt-dlp (Get best quality available)
-    // We use a temporary filename to ensure we can re-encode it safely
+    // We use a temporary filename to ensure we can re-encode it safely.
+    // The extension is left to yt-dlp — see resolve_temp_output for why.
     let temp_id = uuid::Uuid::new_v4().to_string();
-    let temp_output = target_dir.join(format!("{}.tmp.mp4", temp_id));
-    let temp_output_str = temp_output.to_string_lossy().to_string();
+    let temp_template = target_dir.join(format!("{}.tmp.%(ext)s", temp_id));
+    let temp_template_str = temp_template.to_string_lossy().to_string();
 
     let mut child = hidden_cmd(&yt_dlp_path)
         .arg("--newline")
         .arg("--progress")
+        // Without this yt-dlp writes in the console code page, so a message
+        // containing non-ASCII text reaches us as invalid UTF-8. See drain_lines.
+        .arg("--encoding")
+        .arg("utf-8")
         .arg("--no-check-certificates")
         .arg("--ffmpeg-location")
         .arg(&ffmpeg_path)
         .arg("-o")
-        .arg(&temp_output_str)
+        .arg(&temp_template_str)
         .arg("--no-playlist")
         .arg("--user-agent")
         .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -291,19 +418,34 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         });
     }
 
-    // Get the final filename that yt-dlp actually used (it might have changed extension or added suffix)
-    // Since we forced -o with a specific tmp name, it should be exactly that.
-    
+    // Which extension yt-dlp settled on is only knowable after the fact, so the
+    // file has to be looked up rather than assumed.
+    let temp_output = resolve_temp_output(&target_dir, &temp_id).ok_or_else(|| {
+        format!(
+            "yt-dlp reported success but left no {}.tmp.* file in {}",
+            temp_id,
+            target_dir.display()
+        )
+    })?;
+    let temp_output_str = temp_output.to_string_lossy().to_string();
+
     // Step 2: Get the intended title for the final file
     let output = hidden_cmd(&yt_dlp_path)
         .arg("--get-filename")
         .arg("-o")
         .arg("%(title)s.mp4") // Force .mp4 extension for final
+        // The filename is printed on stdout in the console code page unless this
+        // is set. On a Traditional Chinese Windows (cp950) a CJK title decoded as
+        // UTF-8 became 65 U+FFFD replacement characters, and the video was saved
+        // under that mojibake name; characters absent from the code page — emoji,
+        // and the fullwidth solidus yt-dlp substitutes for "/" — were lost outright.
+        .arg("--encoding")
+        .arg("utf-8")
         .arg("--no-playlist")
         .arg(&url)
         .output()
         .map_err(|e| format!("Failed to get title: {}", e))?;
-    
+
     let base_name = if output.status.success() {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
@@ -319,10 +461,16 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     // Step 3: Produce the final MP4. Facebook and Instagram sources are usually
     // already H.264/AAC, where a container remux is effectively instant and
     // lossless; re-encoding is the fallback for anything else.
-    let probe = find_tool_path("ffprobe")
+    let ffprobe_path = find_tool_path("ffprobe");
+    let probe = ffprobe_path
         .as_deref()
         .and_then(|ffprobe_path| probe_media(ffprobe_path, &temp_output_str));
     let plan = plan_post_processing(probe.as_ref());
+    // Needed to turn ffmpeg's elapsed output time into a percentage. `None` simply
+    // means post-processing reports no incremental progress.
+    let duration_secs = ffprobe_path
+        .as_deref()
+        .and_then(|ffprobe_path| probe_duration_secs(ffprobe_path, &temp_output_str));
 
     let _ = app.emit("download-progress", ProgressPayload {
         id: id.clone(),
@@ -372,8 +520,14 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("-dn") // Drop data streams
         .arg("-movflags")
         .arg("+faststart") // Enable streaming/fast playback
+        // Machine-readable progress on stdout, and no duplicate stats on stderr —
+        // which also keeps the stderr tail useful for reporting real failures.
+        .arg("-progress")
+        .arg("pipe:1")
+        .arg("-nostats")
         .arg(&final_output_str)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("FFmpeg execution failed: {}", e))?;
@@ -383,6 +537,35 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     // example "File name too long") never reaches the user.
     let ffmpeg_stderr = ffmpeg_child.stderr.take().unwrap();
     let (ffmpeg_tail, ffmpeg_reader) = spawn_stderr_collector(ffmpeg_stderr);
+
+    // Report progress while post-processing runs. Without this the UI sits on the
+    // single 95% event for the whole re-encode — a 27 minute video took over 40
+    // minutes on a real machine — which is indistinguishable from a hang.
+    //
+    // Reading to EOF here also drains the pipe, so ffmpeg cannot block on a full
+    // one, and it doubles as waiting for the work to finish.
+    if let Some(stdout) = ffmpeg_child.stdout.take() {
+        let status = match plan {
+            PostProcessPlan::Remux => STATUS_REMUX,
+            PostProcessPlan::ReEncode => STATUS_REENCODE,
+        };
+        for chunk in BufReader::new(stdout).split(b'\n') {
+            let Ok(bytes) = chunk else { break };
+            let Some(out_time) = parse_progress_out_time(&String::from_utf8_lossy(&bytes)) else {
+                continue;
+            };
+            let Some(duration) = duration_secs else { continue };
+            let _ = app.emit(
+                "download-progress",
+                ProgressPayload {
+                    id: id.clone(),
+                    progress: post_process_progress(out_time, duration),
+                    speed: status.to_string(),
+                },
+            );
+        }
+    }
+
     let ffmpeg_status = ffmpeg_child
         .wait()
         .map_err(|e| format!("Failed to wait for ffmpeg: {}", e))?;
@@ -433,12 +616,29 @@ fn reveal_in_file_manager(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the raw `/select` command line for `explorer.exe`.
+///
+/// The quotes have to wrap the path only. Passing `/select,<path>` as a normal
+/// argument makes `Command` quote the whole thing once the path contains a space
+/// — `"/select,C:\My Videos\clip.mp4"` — which explorer cannot parse: it silently
+/// opens the Documents folder and selects nothing, so the button looks broken.
+///
+/// Deliberately not `#[cfg(target_os = "windows")]`, so the test below runs on
+/// every platform. This bug shipped precisely because the Windows branch was
+/// never executed — or even compiled — on the machine it was developed on.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn explorer_select_arg(path: &str) -> String {
+    format!("/select,\"{}\"", path)
+}
+
 #[cfg(target_os = "windows")]
 fn reveal_in_file_manager(path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
     // explorer.exe exits with a non-zero code even when it succeeds, so only a
     // spawn failure is treated as an error.
     hidden_cmd("explorer")
-        .arg(format!("/select,{}", path))
+        .raw_arg(explorer_select_arg(path))
         .spawn()
         .map_err(|e| format!("Failed to reveal file in File Explorer: {}", e))?;
     Ok(())
@@ -698,6 +898,195 @@ mod tests {
         let bounded = bound_filename(&name, 200);
         let stem = bounded.trim_end_matches(".mp4");
         assert_eq!(stem, stem.trim_end(), "stem should not end with whitespace");
+    }
+
+    // Post-processing progress. The UI previously sat on a single 95% event for the
+    // entire re-encode, which users read as a hang.
+
+    #[test]
+    fn progress_line_is_read_as_seconds() {
+        // 12.345678 s expressed the way ffmpeg -progress writes it.
+        assert_eq!(parse_progress_out_time("out_time_us=12345678"), Some(12.345678));
+    }
+
+    #[test]
+    fn progress_line_tolerates_trailing_carriage_return() {
+        assert_eq!(parse_progress_out_time("out_time_us=1000000\r"), Some(1.0));
+    }
+
+    #[test]
+    fn other_progress_keys_are_ignored() {
+        // out_time_ms is deliberately not read: it holds microseconds in several
+        // ffmpeg releases, so reading it as milliseconds overshoots 1000x.
+        for line in [
+            "out_time_ms=12345678",
+            "out_time=00:00:12.345678",
+            "frame=298",
+            "progress=continue",
+            "speed=1.02x",
+        ] {
+            assert_eq!(parse_progress_out_time(line), None, "{} should be ignored", line);
+        }
+    }
+
+    #[test]
+    fn progress_before_the_first_frame_is_ignored() {
+        // ffmpeg emits N/A until it has written something.
+        assert_eq!(parse_progress_out_time("out_time_us=N/A"), None);
+    }
+
+    #[test]
+    fn duration_output_is_parsed() {
+        // The real duration of the video that exposed the missing progress.
+        assert_eq!(parse_duration_output("1656.181000\n"), Some(1656.181));
+    }
+
+    #[test]
+    fn unknown_duration_does_not_become_zero() {
+        // A zero would make every progress value 95% and divide-by-zero the ratio.
+        for raw in ["N/A", "", "0", "0.000000", "-1"] {
+            assert_eq!(parse_duration_output(raw), None, "{:?} should be rejected", raw);
+        }
+    }
+
+    #[test]
+    fn progress_spans_the_reserved_band() {
+        assert_eq!(post_process_progress(0.0, 100.0), 95.0);
+        assert_eq!(post_process_progress(50.0, 100.0), 97.5);
+    }
+
+    #[test]
+    fn progress_never_reports_complete_on_its_own() {
+        // Completion is reported by its own event; ffmpeg's last report can also
+        // exceed the probed duration.
+        assert_eq!(post_process_progress(100.0, 100.0), POST_PROCESS_CEILING);
+        assert_eq!(post_process_progress(120.0, 100.0), POST_PROCESS_CEILING);
+    }
+
+    #[test]
+    fn unknown_duration_reports_the_start_of_the_band() {
+        // Better than fabricating a percentage from a duration we do not have.
+        assert_eq!(post_process_progress(42.0, 0.0), 95.0);
+    }
+
+    // Draining a child's stderr. A cp950 error message used to end the iteration,
+    // which let the pipe fill and the child block — an unfinishable download.
+
+    /// "流暢" in Big5: valid in cp950, invalid as UTF-8.
+    const BIG5_BYTES: [u8; 4] = [0xAC, 0x79, 0xB3, 0x74];
+
+    fn drained(input: Vec<u8>) -> Vec<String> {
+        let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        drain_lines(std::io::Cursor::new(input), &tail);
+        collected_stderr(&tail).lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn draining_continues_past_a_line_that_is_not_utf8() {
+        let mut input = b"before\n".to_vec();
+        input.extend_from_slice(&BIG5_BYTES);
+        input.extend_from_slice(b"\nafter\n");
+
+        let lines = drained(input);
+
+        assert_eq!(lines.len(), 3, "no line may be dropped: {:?}", lines);
+        assert_eq!(lines[0], "before");
+        assert_eq!(lines[2], "after");
+        // The undecodable line survives as replacement characters, not as a gap.
+        assert!(lines[1].contains('\u{FFFD}'), "got {:?}", lines[1]);
+    }
+
+    #[test]
+    fn draining_strips_carriage_returns() {
+        // yt-dlp and ffmpeg both emit CRLF on Windows.
+        assert_eq!(drained(b"one\r\ntwo\r\n".to_vec()), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn draining_keeps_only_the_last_lines() {
+        let input: Vec<u8> = (0..STDERR_TAIL_LINES + 3)
+            .map(|i| format!("line{}\n", i))
+            .collect::<String>()
+            .into_bytes();
+
+        let lines = drained(input);
+
+        assert_eq!(lines.len(), STDERR_TAIL_LINES);
+        assert_eq!(lines[0], "line3", "oldest lines should be dropped first");
+    }
+
+    // Locating yt-dlp's output. A YouTube download landed as
+    // `<id>.tmp.mp4.webm` while ffprobe and ffmpeg were handed `<id>.tmp.mp4`,
+    // so the download failed after fetching 2.37 GB and the file was orphaned.
+
+    const TEMP_ID: &str = "0bced93f-cff1-4263-9b86-a39f5df97b08";
+
+    #[test]
+    fn temp_output_is_found_whatever_extension_yt_dlp_chose() {
+        for ext in ["mp4", "webm", "mkv", "m4a"] {
+            let name = format!("{}.tmp.{}", TEMP_ID, ext);
+            assert!(is_temp_output(&name, TEMP_ID), "{} should match", name);
+        }
+    }
+
+    #[test]
+    fn the_youtube_download_that_failed_is_recognised() {
+        // The exact name left on disk by the failing download.
+        assert!(is_temp_output(
+            "0bced93f-cff1-4263-9b86-a39f5df97b08.tmp.mp4.webm",
+            TEMP_ID
+        ));
+    }
+
+    #[test]
+    fn incomplete_downloads_are_not_treated_as_the_output() {
+        // Handing a .part file to ffmpeg would produce a truncated video.
+        assert!(!is_temp_output(&format!("{}.tmp.webm.part", TEMP_ID), TEMP_ID));
+        assert!(!is_temp_output(&format!("{}.tmp.mp4.ytdl", TEMP_ID), TEMP_ID));
+    }
+
+    #[test]
+    fn another_downloads_temp_file_is_ignored() {
+        // Concurrent downloads share the directory, so the id must be respected.
+        let other = "ffffffff-0000-0000-0000-000000000000";
+        assert!(!is_temp_output(&format!("{}.tmp.mp4", other), TEMP_ID));
+    }
+
+    #[test]
+    fn the_final_video_is_not_treated_as_the_temp_file() {
+        assert!(!is_temp_output("My Holiday Clip.mp4", TEMP_ID));
+        assert!(!is_temp_output(&format!("{}.mp4", TEMP_ID), TEMP_ID));
+    }
+
+    // Revealing a file in Explorer. Measured on Windows 11: with the path passed
+    // as a normal argument, `C:\Users\<user>\My Videos\clip.mp4` opened
+    // `C:\Users\<user>\OneDrive\文件` and selected nothing.
+
+    #[test]
+    fn explorer_argument_quotes_only_the_path() {
+        assert_eq!(
+            explorer_select_arg(r"C:\Users\u\My Videos\clip.mp4"),
+            "/select,\"C:\\Users\\u\\My Videos\\clip.mp4\""
+        );
+    }
+
+    #[test]
+    fn explorer_argument_keeps_the_switch_outside_the_quotes() {
+        // The whole argument must never be quoted as one unit; that is the form
+        // explorer silently fails on.
+        let arg = explorer_select_arg(r"C:\a b\c.mp4");
+        assert!(arg.starts_with("/select,\""), "got {}", arg);
+        assert!(!arg.starts_with('"'), "switch must stay unquoted: {}", arg);
+    }
+
+    #[test]
+    fn explorer_argument_is_the_same_shape_without_spaces() {
+        // A path without spaces used to work by accident; quoting it too keeps a
+        // single code path rather than two behaviours to reason about.
+        assert_eq!(
+            explorer_select_arg(r"C:\Downloads\clip.mp4"),
+            "/select,\"C:\\Downloads\\clip.mp4\""
+        );
     }
 
     #[test]
