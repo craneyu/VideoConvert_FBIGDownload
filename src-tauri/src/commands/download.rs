@@ -196,6 +196,31 @@ fn probe_media(ffprobe_path: &str, path: &str) -> Option<ProbeResult> {
     parse_probe_json(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Drain a reader into a bounded ring buffer of lines.
+///
+/// Splits on bytes rather than using `lines()`. `lines()` yields an error for any
+/// line that is not valid UTF-8, and `map_while(Result::ok)` ended the loop there:
+/// the drain thread exits while the child keeps writing, the pipe fills, and the
+/// child blocks forever — the very stall the draining exists to prevent. Windows
+/// makes that reachable, because tools write their messages in the console code
+/// page (cp950 on a Traditional Chinese install) rather than UTF-8.
+///
+/// Replacement characters in an error message are an acceptable outcome. A
+/// download that never finishes is not.
+fn drain_lines<R: std::io::Read>(reader: R, tail: &Arc<Mutex<VecDeque<String>>>) {
+    for chunk in BufReader::new(reader).split(b'\n') {
+        let Ok(bytes) = chunk else { break };
+        let line = String::from_utf8_lossy(&bytes)
+            .trim_end_matches('\r')
+            .to_string();
+        let mut buf = tail.lock().unwrap();
+        if buf.len() == STDERR_TAIL_LINES {
+            buf.pop_front();
+        }
+        buf.push_back(line);
+    }
+}
+
 /// Continuously drain a child's stderr into a bounded ring buffer.
 ///
 /// Draining matters as much as the content: an unread pipe fills up and blocks
@@ -205,15 +230,7 @@ fn spawn_stderr_collector(
 ) -> (Arc<Mutex<VecDeque<String>>>, std::thread::JoinHandle<()>) {
     let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
     let writer = Arc::clone(&tail);
-    let handle = std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            let mut buf = writer.lock().unwrap();
-            if buf.len() == STDERR_TAIL_LINES {
-                buf.pop_front();
-            }
-            buf.push_back(line);
-        }
-    });
+    let handle = std::thread::spawn(move || drain_lines(stderr, &writer));
     (tail, handle)
 }
 
@@ -277,6 +294,10 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     let mut child = hidden_cmd(&yt_dlp_path)
         .arg("--newline")
         .arg("--progress")
+        // Without this yt-dlp writes in the console code page, so a message
+        // containing non-ASCII text reaches us as invalid UTF-8. See drain_lines.
+        .arg("--encoding")
+        .arg("utf-8")
         .arg("--no-check-certificates")
         .arg("--ffmpeg-location")
         .arg(&ffmpeg_path)
@@ -349,11 +370,18 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("--get-filename")
         .arg("-o")
         .arg("%(title)s.mp4") // Force .mp4 extension for final
+        // The filename is printed on stdout in the console code page unless this
+        // is set. On a Traditional Chinese Windows (cp950) a CJK title decoded as
+        // UTF-8 became 65 U+FFFD replacement characters, and the video was saved
+        // under that mojibake name; characters absent from the code page — emoji,
+        // and the fullwidth solidus yt-dlp substitutes for "/" — were lost outright.
+        .arg("--encoding")
+        .arg("utf-8")
         .arg("--no-playlist")
         .arg(&url)
         .output()
         .map_err(|e| format!("Failed to get title: {}", e))?;
-    
+
     let base_name = if output.status.success() {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
@@ -765,6 +793,52 @@ mod tests {
         let bounded = bound_filename(&name, 200);
         let stem = bounded.trim_end_matches(".mp4");
         assert_eq!(stem, stem.trim_end(), "stem should not end with whitespace");
+    }
+
+    // Draining a child's stderr. A cp950 error message used to end the iteration,
+    // which let the pipe fill and the child block — an unfinishable download.
+
+    /// "流暢" in Big5: valid in cp950, invalid as UTF-8.
+    const BIG5_BYTES: [u8; 4] = [0xAC, 0x79, 0xB3, 0x74];
+
+    fn drained(input: Vec<u8>) -> Vec<String> {
+        let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+        drain_lines(std::io::Cursor::new(input), &tail);
+        collected_stderr(&tail).lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn draining_continues_past_a_line_that_is_not_utf8() {
+        let mut input = b"before\n".to_vec();
+        input.extend_from_slice(&BIG5_BYTES);
+        input.extend_from_slice(b"\nafter\n");
+
+        let lines = drained(input);
+
+        assert_eq!(lines.len(), 3, "no line may be dropped: {:?}", lines);
+        assert_eq!(lines[0], "before");
+        assert_eq!(lines[2], "after");
+        // The undecodable line survives as replacement characters, not as a gap.
+        assert!(lines[1].contains('\u{FFFD}'), "got {:?}", lines[1]);
+    }
+
+    #[test]
+    fn draining_strips_carriage_returns() {
+        // yt-dlp and ffmpeg both emit CRLF on Windows.
+        assert_eq!(drained(b"one\r\ntwo\r\n".to_vec()), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn draining_keeps_only_the_last_lines() {
+        let input: Vec<u8> = (0..STDERR_TAIL_LINES + 3)
+            .map(|i| format!("line{}\n", i))
+            .collect::<String>()
+            .into_bytes();
+
+        let lines = drained(input);
+
+        assert_eq!(lines.len(), STDERR_TAIL_LINES);
+        assert_eq!(lines[0], "line3", "oldest lines should be dropped first");
     }
 
     // Locating yt-dlp's output. A YouTube download landed as
