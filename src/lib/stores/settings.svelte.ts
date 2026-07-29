@@ -11,7 +11,9 @@ class SettingsStore {
     settings = $state<Settings | null>(null);
     loading = $state(true);
 
-    async load(retries = 10) {
+    // Explicit return type: the method recurses on retry, so TypeScript cannot
+    // infer it and reports an implicit-any error without this annotation.
+    async load(retries = 10): Promise<void> {
         this.loading = true;
         try {
             this.settings = await invoke<Settings>('get_settings');

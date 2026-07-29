@@ -109,8 +109,25 @@
       console.error("Dependency check failed:", e);
     }
 
-    // Progress Listeners
-    const unlistenDl = await listen("download-progress", (event: any) => {
+  });
+
+  // --- Tauri Event Listeners ---
+  // These live in an $effect rather than onMount because onMount with an async
+  // callback returns a Promise, and Svelte then never calls the cleanup function
+  // it returns. That leaked one listener set per mount: after navigating to
+  // settings and back, a single file drop created duplicate transcoding tasks.
+  $effect(() => {
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+
+    const register = async (event: string, handler: (payload: any) => void) => {
+      const unlisten = await listen(event, handler);
+      // The effect can be torn down before listen() resolves.
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    };
+
+    register("download-progress", (event: any) => {
       const task = downloadTasks.find(t => t.id === event.payload.id || (t.dbId && t.dbId.toString() === event.payload.id));
       if (task) {
         task.progress = event.payload.progress;
@@ -119,31 +136,32 @@
       }
     });
 
-    const unlistenTr = await listen("transcode-progress", (event: any) => {
+    register("transcode-progress", (event: any) => {
       const task = transcodeTasks.find(t => t.id === event.payload.id);
       if (task) {
         task.progress = event.payload.progress;
         task.time = event.payload.time;
       }
     });
-const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
-  console.log("Drag-drop event received:", event);
-  // In Tauri 2, payload might be an object containing 'paths' or just the paths array
-  const paths = Array.isArray(event.payload) ? event.payload : (event.payload?.paths || []);
 
-  if (activeTab === "transcode" && paths.length > 0) {
-    for (const path of paths) {
-      if (typeof path === 'string' && path.match(/\.(mp4|avi|mov|mkv)$/i)) {
-        addTranscodeTask(path);
+    register("tauri://drag-drop", (event: any) => {
+      console.log("Drag-drop event received:", event);
+      // In Tauri 2, payload might be an object containing 'paths' or just the paths array
+      const paths = Array.isArray(event.payload) ? event.payload : (event.payload?.paths || []);
+
+      if (activeTab === "transcode" && paths.length > 0) {
+        for (const path of paths) {
+          if (typeof path === 'string' && path.match(/\.(mp4|avi|mov|mkv)$/i)) {
+            addTranscodeTask(path);
+          }
+        }
       }
-    }
-  }
-});
+    });
 
     return () => {
-      unlistenDl();
-      unlistenTr();
-      unlistenDrop();
+      disposed = true;
+      for (const unlisten of unlisteners) unlisten();
+      unlisteners.length = 0;
     };
   });
 
@@ -192,7 +210,10 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
         }
       }
     } catch (e) {
-      // Ignore updater errors for now (e.g. repo not set up yet)
+      // Log rather than swallow: an empty catch here hid a completely broken
+      // update path for two months. No dialog — a failed check must not
+      // interrupt startup.
+      console.error("更新檢查失敗:", e);
     }
   }
 
@@ -276,6 +297,24 @@ const unlistenDrop = await listen("tauri://drag-drop", (event: any) => {
     } catch (e) {
       nextTask.status = 'failed';
       console.error("Task error:", e);
+
+      // Persist the failure. Without this the history row keeps the "downloading"
+      // status it was inserted with and stays that way forever.
+      // A task that failed before its row existed (e.g. metadata fetch) has no
+      // dbId, so there is nothing to update.
+      if (nextTask.dbId !== undefined) {
+        try {
+          await db.execute(
+            "UPDATE download_history SET status = ? WHERE id = ?",
+            ["failed", nextTask.dbId]
+          );
+          await loadHistory();
+        } catch (dbError) {
+          // Must not mask the original failure reason shown to the user below.
+          console.error("Failed to persist failed status:", dbError);
+        }
+      }
+
       alert(`任務失敗: ${e}`);
     } finally {
       processQueue();

@@ -115,10 +115,9 @@ mod tests {
         let settings = Settings::default();
         assert_eq!(settings.auto_organize, false);
         assert_eq!(settings.transcoding_preset, "Balanced");
-        // We cannot guarantee download_path is not empty on all CI environments,
-        // but typically it shouldn't be empty unless the OS doesn't provide one.
-        // So we just check that the struct can be instantiated.
-        assert!(settings.download_path.len() >= 0);
+        assert_eq!(settings.detect_clipboard, true);
+        // download_path comes from the OS and can legitimately be empty on a CI
+        // runner that provides no Downloads directory, so it is not asserted here.
     }
 
     #[test]

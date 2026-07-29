@@ -45,6 +45,52 @@ pub fn run() {
                                 value TEXT NOT NULL
                             );",
                             kind: tauri_plugin_sql::MigrationKind::Up,
+                        },
+                        // Migration 1 defaulted created_at to CURRENT_TIMESTAMP, which
+                        // SQLite evaluates in UTC, while the UI renders the value as if
+                        // it were local time. Migration 1 cannot be edited — installs
+                        // that already ran it never re-run it — so the default change
+                        // and the backfill are applied here instead.
+                        //
+                        // Both MUST stay in this single migration version. Changing the
+                        // default without backfilling (or vice versa) leaves UTC and
+                        // local rows mixed in a column that carries no timezone, and
+                        // there is then no way to tell which rows were converted.
+                        //
+                        // SQLite cannot alter a column default in place, hence the
+                        // rebuild. Rows are copied before the old table is dropped.
+                        // datetime(created_at, 'localtime') reads the stored value as
+                        // UTC and converts it using the host's zone, so this is correct
+                        // outside UTC+8 as well.
+                        //
+                        // The four statements below rely on two guarantees verified in
+                        // sqlx 0.8.6, which backs this plugin:
+                        //   - Executor::execute delegates to execute_many, so every
+                        //     statement in this string runs, not just the first.
+                        //   - The migrator wraps the script and its version bookkeeping
+                        //     in one transaction, so a failure part-way rolls the whole
+                        //     thing back and version 3 is not recorded. There is no
+                        //     half-applied state to recover from.
+                        tauri_plugin_sql::Migration {
+                            version: 3,
+                            description: "store download_history.created_at in local time",
+                            sql: "CREATE TABLE download_history_local (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                url TEXT NOT NULL,
+                                title TEXT,
+                                status TEXT NOT NULL,
+                                file_path TEXT,
+                                source TEXT,
+                                created_at DATETIME DEFAULT (datetime('now', 'localtime'))
+                            );
+                            INSERT INTO download_history_local
+                                (id, url, title, status, file_path, source, created_at)
+                                SELECT id, url, title, status, file_path, source,
+                                       datetime(created_at, 'localtime')
+                                FROM download_history;
+                            DROP TABLE download_history;
+                            ALTER TABLE download_history_local RENAME TO download_history;",
+                            kind: tauri_plugin_sql::MigrationKind::Up,
                         }
                     ],
                 )
