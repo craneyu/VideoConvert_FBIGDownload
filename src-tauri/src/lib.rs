@@ -13,6 +13,13 @@ fn greet(name: &str) -> String {
 /// Event name the backend uses to ask the frontend to change route.
 pub const NAVIGATE_EVENT: &str = "navigate";
 
+/// Tray menu item ids. Shared between the menu definition and `tray_action` so a
+/// label change can never silently break the mapping — the ids are the contract,
+/// the labels are presentation.
+pub const MENU_ID_QUIT: &str = "quit";
+pub const MENU_ID_SHOW: &str = "show";
+pub const MENU_ID_SETTINGS: &str = "settings";
+
 /// What a tray menu selection should do.
 ///
 /// Kept separate from the menu handler so the mapping is unit-testable: the
@@ -38,9 +45,9 @@ fn reveal_main_window(app: &tauri::AppHandle) {
 /// Map a tray menu item id to the action it should perform.
 pub fn tray_action(menu_id: &str) -> TrayAction {
     match menu_id {
-        "quit" => TrayAction::Quit,
-        "show" => TrayAction::ShowWindow,
-        "settings" => TrayAction::ShowWindowAndNavigate("/settings"),
+        MENU_ID_QUIT => TrayAction::Quit,
+        MENU_ID_SHOW => TrayAction::ShowWindow,
+        MENU_ID_SETTINGS => TrayAction::ShowWindowAndNavigate("/settings"),
         _ => TrayAction::Ignore,
     }
 }
@@ -170,9 +177,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)?;
-            let settings_i = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            // Labels are shown to the user, so they follow the rest of the UI and
+            // the wording in the spec. The ids must stay stable — `tray_action`
+            // matches on them, not on the label.
+            let quit_i = MenuItem::with_id(app, MENU_ID_QUIT, "結束程式", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, MENU_ID_SHOW, "顯示視窗", true, None::<&str>)?;
+            let settings_i =
+                MenuItem::with_id(app, MENU_ID_SETTINGS, "軟體設定", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &settings_i, &quit_i])?;
 
             let _tray = TrayIconBuilder::new()
