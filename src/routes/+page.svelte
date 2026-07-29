@@ -18,7 +18,7 @@
     status: 'pending' | 'fetching' | 'downloading' | 'completed' | 'failed';
     progress: number;
     speed: string;
-    source: 'Facebook' | 'Instagram' | 'Unknown';
+    source: 'Facebook' | 'Instagram' | 'YouTube' | 'Unknown';
     dbId?: number;
   }
 
@@ -42,6 +42,51 @@
   // Regex Patterns for FB/IG
   const FB_REGEX = /https?:\/\/(www\.)?(facebook\.com|fb\.watch)\/.+/;
   const IG_REGEX = /https?:\/\/(www\.)?instagram\.com\/(p|reels|reel)\/.+/;
+
+  // Which platform a URL belongs to. This only decides the subfolder and the
+  // badge — yt-dlp itself handles far more sites than these, and anything not
+  // listed is filed under "Unknown" on purpose.
+  //
+  // Matched on the hostname rather than anywhere in the URL, so a link that
+  // merely mentions a platform (a redirect carrying ?url=youtube.com, say)
+  // cannot land in the wrong folder.
+  function detectSource(rawUrl: string): DownloadTask['source'] {
+    let host: string;
+    try {
+      host = new URL(rawUrl).hostname.toLowerCase().replace(/^www\./, "");
+    } catch {
+      return "Unknown";
+    }
+    const hostedBy = (...domains: string[]) =>
+      domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
+
+    if (hostedBy("facebook.com", "fb.watch", "fb.com")) return "Facebook";
+    if (hostedBy("instagram.com")) return "Instagram";
+    if (hostedBy("youtube.com", "youtu.be", "youtube-nocookie.com")) return "YouTube";
+    return "Unknown";
+  }
+
+  // Tailwind classes per platform. Keyed so a new platform cannot silently
+  // inherit another one's colour, which is what a ternary chain would do.
+  const SOURCE_BADGE: Record<DownloadTask['source'], string> = {
+    Facebook: "bg-blue-100 text-blue-700",
+    Instagram: "bg-pink-100 text-pink-700",
+    YouTube: "bg-red-100 text-red-700",
+    Unknown: "bg-neutral-100 text-neutral-700",
+  };
+  const SOURCE_TEXT: Record<DownloadTask['source'], string> = {
+    Facebook: "text-blue-600",
+    Instagram: "text-pink-600",
+    YouTube: "text-red-600",
+    Unknown: "text-neutral-500",
+  };
+
+  function badgeClass(source: string | null | undefined): string {
+    return SOURCE_BADGE[source as DownloadTask['source']] ?? SOURCE_BADGE.Unknown;
+  }
+  function textClass(source: string | null | undefined): string {
+    return SOURCE_TEXT[source as DownloadTask['source']] ?? SOURCE_TEXT.Unknown;
+  }
 
   // Queue State
   let downloadTasks = $state<DownloadTask[]>([]);
@@ -223,8 +268,7 @@
     const url = urlInput;
     urlInput = "";
 
-    const source = url.includes("facebook.com") || url.includes("fb.watch") ? "Facebook" : 
-                   url.includes("instagram.com") ? "Instagram" : "Unknown";
+    const source = detectSource(url);
 
     const newTask: DownloadTask = {
       id: Math.random().toString(36).substring(7),
@@ -551,7 +595,7 @@
               <div class="flex justify-between items-start">
                 <div class="flex-1 min-w-0 mr-6">
                   <div class="flex items-center gap-2 mb-1">
-                    <span class="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider {task.source === 'Facebook' ? 'bg-blue-100 text-blue-700' : 'bg-pink-100 text-pink-700'}">
+                    <span class="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider {badgeClass(task.source)}">
                       {task.source}
                     </span>
                     <span class="text-[10px] font-bold text-neutral-400 uppercase">{task.status}</span>
@@ -737,7 +781,7 @@
             <div class="bg-white dark:bg-neutral-900 px-6 py-4 rounded-2xl border border-neutral-200 dark:border-neutral-800 flex items-center gap-6 hover:border-neutral-300 dark:hover:border-neutral-700 transition-all group">
               <!-- Source Icon -->
               <div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center flex-shrink-0">
-                <span class="font-black text-lg {item.source === 'Facebook' ? 'text-blue-600' : 'text-pink-600'}">
+                <span class="font-black text-lg {textClass(item.source)}">
                   {item.source ? item.source[0].toLowerCase() : '?'}
                 </span>
               </div>
