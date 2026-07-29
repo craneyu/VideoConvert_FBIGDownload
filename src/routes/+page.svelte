@@ -39,9 +39,13 @@
   let detectedUrl = $state(""); // New: Store detected clipboard URL
   let lastCheckedClipboard = ""; // New: Prevent duplicate detection
 
-  // Regex Patterns for FB/IG
+  // Clipboard detection patterns, one per supported platform. Deliberately
+  // stricter than detectSource(): that one only needs to pick a folder for a
+  // URL the user already submitted, whereas these decide whether to interrupt
+  // with a banner, so a bare platform homepage must not match.
   const FB_REGEX = /https?:\/\/(www\.)?(facebook\.com|fb\.watch)\/.+/;
   const IG_REGEX = /https?:\/\/(www\.)?instagram\.com\/(p|reels|reel)\/.+/;
+  const YT_REGEX = /https?:\/\/((www|m|music)\.)?(youtube\.com\/(watch\?|shorts\/|live\/)|youtu\.be\/).+/;
 
   // Which platform a URL belongs to. This only decides the subfolder and the
   // badge — yt-dlp itself handles far more sites than these, and anything not
@@ -218,7 +222,7 @@
           const text = await invoke<string | null>("read_clipboard_text");
           if (text && text !== lastCheckedClipboard && text !== urlInput) {
             lastCheckedClipboard = text;
-            if (FB_REGEX.test(text) || IG_REGEX.test(text)) {
+            if (FB_REGEX.test(text) || IG_REGEX.test(text) || YT_REGEX.test(text)) {
               console.log("Detected video URL in clipboard:", text);
               detectedUrl = text;
             } else {
@@ -528,7 +532,7 @@
       <div in:fade={{ duration: 200 }}>
         <header class="mb-10">
           <h2 class="text-3xl font-extrabold tracking-tight mb-2">影片下載</h2>
-          <p class="text-neutral-500 dark:text-neutral-400">貼上網址，我們會自動為您分類與下載</p>
+          <p class="text-neutral-500 dark:text-neutral-400">支援 Facebook、Instagram、YouTube —— 貼上網址即可自動辨識來源並下載</p>
         </header>
 
         {#if detectedUrl}
@@ -567,7 +571,7 @@
             <input 
               bind:value={urlInput}
               onkeydown={(e) => e.key === 'Enter' && addDownloadTask()}
-              placeholder="貼上 Facebook 或 Instagram 影片網址..." 
+              placeholder="貼上 Facebook / Instagram / YouTube 影片網址..."
               class="w-full pl-5 pr-4 py-4 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all shadow-sm group-hover:border-neutral-300 dark:group-hover:border-neutral-700"
             />
           </div>
