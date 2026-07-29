@@ -17,6 +17,12 @@ const STDERR_TAIL_LINES: usize = 20;
 const STATUS_REMUX: &str = "正在進行容器最佳化...";
 const STATUS_REENCODE: &str = "正在重新編碼以確保相容性...";
 
+/// The progress band reserved for post-processing. yt-dlp's own progress is
+/// mapped onto 0–90, and 95 is emitted once the plan is known.
+const POST_PROCESS_START: f64 = 95.0;
+/// Held just below 100 so completion stays the only thing that reports done.
+const POST_PROCESS_CEILING: f64 = 99.9;
+
 /// Byte budget for a single path component.
 ///
 /// macOS/APFS rejects components over 255 bytes with ENAMETOOLONG. We stay well
@@ -104,6 +110,40 @@ pub fn parse_probe_json(raw: &str) -> Option<ProbeResult> {
         width: u32::try_from(video.get("width").and_then(Value::as_i64)?).ok()?,
         height: u32::try_from(video.get("height").and_then(Value::as_i64)?).ok()?,
     })
+}
+
+/// Parse one line of ffmpeg's `-progress` stream into elapsed output seconds.
+///
+/// Only `out_time_us` is read. `out_time_ms` carries microseconds in several
+/// ffmpeg releases, so treating it as milliseconds overshoots by a factor of 1000,
+/// and `out_time` is a formatted timestamp that needs parsing of its own. Lines
+/// for other keys, and the `N/A` that appears before the first frame is written,
+/// yield `None`.
+pub fn parse_progress_out_time(line: &str) -> Option<f64> {
+    let micros: f64 = line.trim().strip_prefix("out_time_us=")?.trim().parse().ok()?;
+    (micros.is_finite() && micros >= 0.0).then_some(micros / 1_000_000.0)
+}
+
+/// Parse `ffprobe -show_entries format=duration -of csv=p=0` output.
+///
+/// `N/A` is what ffprobe prints when the container does not state a duration, and
+/// it must not become zero — a zero would make every progress value 95%.
+pub fn parse_duration_output(raw: &str) -> Option<f64> {
+    let seconds: f64 = raw.trim().parse().ok()?;
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
+/// Map elapsed output time onto the post-processing band.
+///
+/// Clamped at both ends: ffmpeg's final report can exceed the probed duration
+/// slightly, and an unknown duration reports the start of the band rather than a
+/// fabricated value.
+pub fn post_process_progress(out_time_secs: f64, duration_secs: f64) -> f64 {
+    if !(duration_secs > 0.0) {
+        return POST_PROCESS_START;
+    }
+    let ratio = (out_time_secs / duration_secs).clamp(0.0, 1.0);
+    (POST_PROCESS_START + ratio * (100.0 - POST_PROCESS_START)).min(POST_PROCESS_CEILING)
 }
 
 /// Does `file_name` look like the temporary download for `temp_id`?
@@ -194,6 +234,30 @@ fn probe_media(ffprobe_path: &str, path: &str) -> Option<ProbeResult> {
         return None;
     }
     parse_probe_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Read a file's duration in seconds, for turning ffmpeg's elapsed output time
+/// into a percentage. Kept separate from `probe_media` because that answers a
+/// different question — whether the streams are already compatible.
+fn probe_duration_secs(ffprobe_path: &str, path: &str) -> Option<f64> {
+    let output = hidden_cmd(ffprobe_path)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+    parse_duration_output(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Drain a reader into a bounded ring buffer of lines.
@@ -397,10 +461,16 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     // Step 3: Produce the final MP4. Facebook and Instagram sources are usually
     // already H.264/AAC, where a container remux is effectively instant and
     // lossless; re-encoding is the fallback for anything else.
-    let probe = find_tool_path("ffprobe")
+    let ffprobe_path = find_tool_path("ffprobe");
+    let probe = ffprobe_path
         .as_deref()
         .and_then(|ffprobe_path| probe_media(ffprobe_path, &temp_output_str));
     let plan = plan_post_processing(probe.as_ref());
+    // Needed to turn ffmpeg's elapsed output time into a percentage. `None` simply
+    // means post-processing reports no incremental progress.
+    let duration_secs = ffprobe_path
+        .as_deref()
+        .and_then(|ffprobe_path| probe_duration_secs(ffprobe_path, &temp_output_str));
 
     let _ = app.emit("download-progress", ProgressPayload {
         id: id.clone(),
@@ -450,8 +520,14 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("-dn") // Drop data streams
         .arg("-movflags")
         .arg("+faststart") // Enable streaming/fast playback
+        // Machine-readable progress on stdout, and no duplicate stats on stderr —
+        // which also keeps the stderr tail useful for reporting real failures.
+        .arg("-progress")
+        .arg("pipe:1")
+        .arg("-nostats")
         .arg(&final_output_str)
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("FFmpeg execution failed: {}", e))?;
@@ -461,6 +537,35 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     // example "File name too long") never reaches the user.
     let ffmpeg_stderr = ffmpeg_child.stderr.take().unwrap();
     let (ffmpeg_tail, ffmpeg_reader) = spawn_stderr_collector(ffmpeg_stderr);
+
+    // Report progress while post-processing runs. Without this the UI sits on the
+    // single 95% event for the whole re-encode — a 27 minute video took over 40
+    // minutes on a real machine — which is indistinguishable from a hang.
+    //
+    // Reading to EOF here also drains the pipe, so ffmpeg cannot block on a full
+    // one, and it doubles as waiting for the work to finish.
+    if let Some(stdout) = ffmpeg_child.stdout.take() {
+        let status = match plan {
+            PostProcessPlan::Remux => STATUS_REMUX,
+            PostProcessPlan::ReEncode => STATUS_REENCODE,
+        };
+        for chunk in BufReader::new(stdout).split(b'\n') {
+            let Ok(bytes) = chunk else { break };
+            let Some(out_time) = parse_progress_out_time(&String::from_utf8_lossy(&bytes)) else {
+                continue;
+            };
+            let Some(duration) = duration_secs else { continue };
+            let _ = app.emit(
+                "download-progress",
+                ProgressPayload {
+                    id: id.clone(),
+                    progress: post_process_progress(out_time, duration),
+                    speed: status.to_string(),
+                },
+            );
+        }
+    }
+
     let ffmpeg_status = ffmpeg_child
         .wait()
         .map_err(|e| format!("Failed to wait for ffmpeg: {}", e))?;
@@ -793,6 +898,75 @@ mod tests {
         let bounded = bound_filename(&name, 200);
         let stem = bounded.trim_end_matches(".mp4");
         assert_eq!(stem, stem.trim_end(), "stem should not end with whitespace");
+    }
+
+    // Post-processing progress. The UI previously sat on a single 95% event for the
+    // entire re-encode, which users read as a hang.
+
+    #[test]
+    fn progress_line_is_read_as_seconds() {
+        // 12.345678 s expressed the way ffmpeg -progress writes it.
+        assert_eq!(parse_progress_out_time("out_time_us=12345678"), Some(12.345678));
+    }
+
+    #[test]
+    fn progress_line_tolerates_trailing_carriage_return() {
+        assert_eq!(parse_progress_out_time("out_time_us=1000000\r"), Some(1.0));
+    }
+
+    #[test]
+    fn other_progress_keys_are_ignored() {
+        // out_time_ms is deliberately not read: it holds microseconds in several
+        // ffmpeg releases, so reading it as milliseconds overshoots 1000x.
+        for line in [
+            "out_time_ms=12345678",
+            "out_time=00:00:12.345678",
+            "frame=298",
+            "progress=continue",
+            "speed=1.02x",
+        ] {
+            assert_eq!(parse_progress_out_time(line), None, "{} should be ignored", line);
+        }
+    }
+
+    #[test]
+    fn progress_before_the_first_frame_is_ignored() {
+        // ffmpeg emits N/A until it has written something.
+        assert_eq!(parse_progress_out_time("out_time_us=N/A"), None);
+    }
+
+    #[test]
+    fn duration_output_is_parsed() {
+        // The real duration of the video that exposed the missing progress.
+        assert_eq!(parse_duration_output("1656.181000\n"), Some(1656.181));
+    }
+
+    #[test]
+    fn unknown_duration_does_not_become_zero() {
+        // A zero would make every progress value 95% and divide-by-zero the ratio.
+        for raw in ["N/A", "", "0", "0.000000", "-1"] {
+            assert_eq!(parse_duration_output(raw), None, "{:?} should be rejected", raw);
+        }
+    }
+
+    #[test]
+    fn progress_spans_the_reserved_band() {
+        assert_eq!(post_process_progress(0.0, 100.0), 95.0);
+        assert_eq!(post_process_progress(50.0, 100.0), 97.5);
+    }
+
+    #[test]
+    fn progress_never_reports_complete_on_its_own() {
+        // Completion is reported by its own event; ffmpeg's last report can also
+        // exceed the probed duration.
+        assert_eq!(post_process_progress(100.0, 100.0), POST_PROCESS_CEILING);
+        assert_eq!(post_process_progress(120.0, 100.0), POST_PROCESS_CEILING);
+    }
+
+    #[test]
+    fn unknown_duration_reports_the_start_of_the_band() {
+        // Better than fabricating a percentage from a duration we do not have.
+        assert_eq!(post_process_progress(42.0, 0.0), 95.0);
     }
 
     // Draining a child's stderr. A cp950 error message used to end the iteration,
