@@ -532,7 +532,7 @@
       <div in:fade={{ duration: 200 }}>
         <header class="mb-10">
           <h2 class="text-3xl font-extrabold tracking-tight mb-2">影片下載</h2>
-          <p class="text-neutral-500 dark:text-neutral-400">支援 Facebook、Instagram、YouTube —— 貼上網址即可自動辨識來源並下載</p>
+          <p class="text-neutral-500 dark:text-neutral-400">支援 Facebook、Instagram、YouTube，貼上網址自動辨識</p>
         </header>
 
         {#if detectedUrl}
@@ -571,7 +571,7 @@
             <input 
               bind:value={urlInput}
               onkeydown={(e) => e.key === 'Enter' && addDownloadTask()}
-              placeholder="貼上 Facebook / Instagram / YouTube 影片網址..."
+              placeholder="貼上 FB / IG / YouTube 影片網址..."
               class="w-full pl-5 pr-4 py-4 rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all shadow-sm group-hover:border-neutral-300 dark:group-hover:border-neutral-700"
             />
           </div>
