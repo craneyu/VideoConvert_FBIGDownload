@@ -2,12 +2,83 @@ mod commands;
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+/// Event name the backend uses to ask the frontend to change route.
+pub const NAVIGATE_EVENT: &str = "navigate";
+
+/// What a tray menu selection should do.
+///
+/// Kept separate from the menu handler so the mapping is unit-testable: the
+/// handler itself is a closure inside `run()` and cannot be exercised by a test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrayAction {
+    Quit,
+    /// Reveal and focus the main window, nothing more.
+    ShowWindow,
+    /// Reveal and focus the main window, then ask the frontend to navigate.
+    ShowWindowAndNavigate(&'static str),
+    Ignore,
+}
+
+/// Reveal and focus the main window. Safe to call when it is already visible.
+fn reveal_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Map a tray menu item id to the action it should perform.
+pub fn tray_action(menu_id: &str) -> TrayAction {
+    match menu_id {
+        "quit" => TrayAction::Quit,
+        "show" => TrayAction::ShowWindow,
+        "settings" => TrayAction::ShowWindowAndNavigate("/settings"),
+        _ => TrayAction::Ignore,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_menu_item_quits() {
+        assert_eq!(tray_action("quit"), TrayAction::Quit);
+    }
+
+    #[test]
+    fn show_window_menu_item_only_reveals_the_window() {
+        assert_eq!(tray_action("show"), TrayAction::ShowWindow);
+    }
+
+    #[test]
+    fn settings_menu_item_navigates_to_the_settings_route() {
+        // Revealing the window is not enough: when the window is already visible
+        // that is a no-op and the tray item appears to do nothing at all.
+        assert_eq!(
+            tray_action("settings"),
+            TrayAction::ShowWindowAndNavigate("/settings")
+        );
+    }
+
+    #[test]
+    fn unknown_menu_item_is_ignored() {
+        assert_eq!(tray_action("no-such-item"), TrayAction::Ignore);
+    }
+
+    #[test]
+    fn settings_does_not_behave_identically_to_show() {
+        // The original bug was that both arms were byte-identical.
+        assert_ne!(tray_action("settings"), tray_action("show"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -107,24 +178,21 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => {
+                .on_menu_event(|app, event| match tray_action(event.id.as_ref()) {
+                    TrayAction::Quit => {
                         app.exit(0);
                     }
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                    TrayAction::ShowWindow => {
+                        reveal_main_window(app);
                     }
-                    "settings" => {
-                        // For now, just show the main window as a placeholder for settings
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                    TrayAction::ShowWindowAndNavigate(route) => {
+                        reveal_main_window(app);
+                        // Revealing is not enough — when the window is already
+                        // visible the user sees nothing happen. Tell the frontend
+                        // which route to show.
+                        let _ = app.emit(NAVIGATE_EVENT, route);
                     }
-                    _ => {}
+                    TrayAction::Ignore => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Click {
@@ -132,11 +200,7 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        reveal_main_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
