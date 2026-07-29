@@ -433,12 +433,29 @@ fn reveal_in_file_manager(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Build the raw `/select` command line for `explorer.exe`.
+///
+/// The quotes have to wrap the path only. Passing `/select,<path>` as a normal
+/// argument makes `Command` quote the whole thing once the path contains a space
+/// — `"/select,C:\My Videos\clip.mp4"` — which explorer cannot parse: it silently
+/// opens the Documents folder and selects nothing, so the button looks broken.
+///
+/// Deliberately not `#[cfg(target_os = "windows")]`, so the test below runs on
+/// every platform. This bug shipped precisely because the Windows branch was
+/// never executed — or even compiled — on the machine it was developed on.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn explorer_select_arg(path: &str) -> String {
+    format!("/select,\"{}\"", path)
+}
+
 #[cfg(target_os = "windows")]
 fn reveal_in_file_manager(path: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
     // explorer.exe exits with a non-zero code even when it succeeds, so only a
     // spawn failure is treated as an error.
     hidden_cmd("explorer")
-        .arg(format!("/select,{}", path))
+        .raw_arg(explorer_select_arg(path))
         .spawn()
         .map_err(|e| format!("Failed to reveal file in File Explorer: {}", e))?;
     Ok(())
@@ -698,6 +715,37 @@ mod tests {
         let bounded = bound_filename(&name, 200);
         let stem = bounded.trim_end_matches(".mp4");
         assert_eq!(stem, stem.trim_end(), "stem should not end with whitespace");
+    }
+
+    // Revealing a file in Explorer. Measured on Windows 11: with the path passed
+    // as a normal argument, `C:\Users\<user>\My Videos\clip.mp4` opened
+    // `C:\Users\<user>\OneDrive\文件` and selected nothing.
+
+    #[test]
+    fn explorer_argument_quotes_only_the_path() {
+        assert_eq!(
+            explorer_select_arg(r"C:\Users\u\My Videos\clip.mp4"),
+            "/select,\"C:\\Users\\u\\My Videos\\clip.mp4\""
+        );
+    }
+
+    #[test]
+    fn explorer_argument_keeps_the_switch_outside_the_quotes() {
+        // The whole argument must never be quoted as one unit; that is the form
+        // explorer silently fails on.
+        let arg = explorer_select_arg(r"C:\a b\c.mp4");
+        assert!(arg.starts_with("/select,\""), "got {}", arg);
+        assert!(!arg.starts_with('"'), "switch must stay unquoted: {}", arg);
+    }
+
+    #[test]
+    fn explorer_argument_is_the_same_shape_without_spaces() {
+        // A path without spaces used to work by accident; quoting it too keeps a
+        // single code path rather than two behaviours to reason about.
+        assert_eq!(
+            explorer_select_arg(r"C:\Downloads\clip.mp4"),
+            "/select,\"C:\\Downloads\\clip.mp4\""
+        );
     }
 
     #[test]
