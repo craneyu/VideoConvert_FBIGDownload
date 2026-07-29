@@ -17,6 +17,44 @@ const STDERR_TAIL_LINES: usize = 20;
 const STATUS_REMUX: &str = "正在進行容器最佳化...";
 const STATUS_REENCODE: &str = "正在重新編碼以確保相容性...";
 
+/// Byte budget for a single path component.
+///
+/// macOS/APFS rejects components over 255 bytes with ENAMETOOLONG. We stay well
+/// under that because the effective limit varies with encoding and normalisation,
+/// and because a shortened name is harmless while a failed download is not.
+const MAX_FILENAME_BYTES: usize = 200;
+
+/// Shorten a file name so the component fits the filesystem limit.
+///
+/// Facebook and Instagram "titles" are the whole post description — 600+
+/// characters is normal — and `yt-dlp --get-filename` sanitises illegal
+/// characters but does not bound length. Truncation happens on a UTF-8 character
+/// boundary so the result stays valid, and the extension is preserved because
+/// ffmpeg picks the output container from it.
+pub fn bound_filename(name: &str, max_bytes: usize) -> String {
+    if name.len() <= max_bytes {
+        return name.to_string();
+    }
+
+    // Only a short trailing segment counts as an extension — a dot inside a long
+    // description must not be mistaken for one.
+    const MAX_EXTENSION_BYTES: usize = 8;
+    let (stem, extension) = match name.rfind('.') {
+        Some(dot) if dot > 0 && name.len() - dot <= MAX_EXTENSION_BYTES => {
+            (&name[..dot], &name[dot..])
+        }
+        _ => (name, ""),
+    };
+
+    let budget = max_bytes.saturating_sub(extension.len());
+    let mut end = budget.min(stem.len());
+    while end > 0 && !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{}{}", stem[..end].trim_end(), extension)
+}
+
 #[derive(Serialize, Clone)]
 pub struct ProgressPayload {
     pub id: String,
@@ -271,6 +309,9 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     } else {
         format!("{}.mp4", temp_id)
     };
+    // yt-dlp sanitises illegal characters but not length, and a post description
+    // used as a title easily exceeds the 255-byte component limit.
+    let base_name = bound_filename(&base_name, MAX_FILENAME_BYTES);
 
     let final_output = target_dir.join(&base_name);
     let final_output_str = final_output.to_string_lossy().to_string();
@@ -326,24 +367,40 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         }
     }
 
-    let ffmpeg_status = ffmpeg_cmd
+    let mut ffmpeg_child = ffmpeg_cmd
         .arg("-sn") // Drop subtitles
         .arg("-dn") // Drop data streams
         .arg("-movflags")
         .arg("+faststart") // Enable streaming/fast playback
         .arg(&final_output_str)
-        .status()
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("FFmpeg execution failed: {}", e))?;
+
+    // Capture ffmpeg's stderr for the same reason as yt-dlp's: without it a
+    // failure here reports only a fixed string, and the actual cause (for
+    // example "File name too long") never reaches the user.
+    let ffmpeg_stderr = ffmpeg_child.stderr.take().unwrap();
+    let (ffmpeg_tail, ffmpeg_reader) = spawn_stderr_collector(ffmpeg_stderr);
+    let ffmpeg_status = ffmpeg_child
+        .wait()
+        .map_err(|e| format!("Failed to wait for ffmpeg: {}", e))?;
+    let _ = ffmpeg_reader.join();
 
     // Cleanup temp file
     let _ = std::fs::remove_file(&temp_output);
 
     if !ffmpeg_status.success() {
-        return Err(match plan {
-            PostProcessPlan::Remux => "Container optimization (remux) failed".to_string(),
-            PostProcessPlan::ReEncode => {
-                "Compatibility optimization (re-encoding) failed".to_string()
-            }
+        let phase = match plan {
+            PostProcessPlan::Remux => "Container optimization (remux) failed",
+            PostProcessPlan::ReEncode => "Compatibility optimization (re-encoding) failed",
+        };
+        let detail = collected_stderr(&ffmpeg_tail);
+        return Err(if detail.trim().is_empty() {
+            phase.to_string()
+        } else {
+            format!("{}:\n{}", phase, detail)
         });
     }
 
@@ -568,6 +625,80 @@ mod tests {
         }
     ]
 }"#;
+
+    // Filename bounding. A Facebook reel whose "title" was the entire post
+    // description produced a 1395-byte name and ffmpeg failed with
+    // "File name too long"; macOS rejects any component over 255 bytes.
+
+    #[test]
+    fn short_name_is_left_alone() {
+        assert_eq!(bound_filename("clip.mp4", 200), "clip.mp4");
+    }
+
+    #[test]
+    fn name_exactly_at_the_limit_is_left_alone() {
+        let name = format!("{}.mp4", "a".repeat(196));
+        assert_eq!(name.len(), 200);
+        assert_eq!(bound_filename(&name, 200), name);
+    }
+
+    #[test]
+    fn long_ascii_name_is_truncated_and_keeps_its_extension() {
+        let name = format!("{}.mp4", "a".repeat(500));
+        let bounded = bound_filename(&name, 200);
+        assert!(bounded.len() <= 200, "got {} bytes", bounded.len());
+        assert!(bounded.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn long_multibyte_name_is_truncated_on_a_character_boundary() {
+        // Each CJK character is 3 bytes, so a naive byte slice would split one
+        // and panic.
+        let name = format!("{}.mp4", "測".repeat(300));
+        let bounded = bound_filename(&name, 200);
+        assert!(bounded.len() <= 200, "got {} bytes", bounded.len());
+        assert!(bounded.ends_with(".mp4"));
+        // Valid UTF-8 with no replacement characters.
+        assert!(!bounded.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn the_reel_title_that_broke_the_download_is_bounded() {
+        // Shape of the real failure: a long description with inner dots and the
+        // fullwidth separators yt-dlp substitutes for illegal characters.
+        let title = format!(
+            "京急線県立大学駅から徒歩3分 Y&Kスポーツアカデミー {} ｜ 山城裕之.mp4",
+            "スポーツを楽しめるアカデミー".repeat(40)
+        );
+        assert!(title.len() > 1000, "fixture should reproduce the size");
+        let bounded = bound_filename(&title, MAX_FILENAME_BYTES);
+        assert!(bounded.len() <= MAX_FILENAME_BYTES, "got {} bytes", bounded.len());
+        assert!(bounded.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn name_without_extension_is_still_bounded() {
+        let bounded = bound_filename(&"b".repeat(400), 200);
+        assert!(bounded.len() <= 200);
+    }
+
+    #[test]
+    fn dots_inside_a_long_description_are_not_treated_as_an_extension() {
+        // "…v1.2.3 something very long" must not have ".3 something very long"
+        // mistaken for the extension.
+        let name = format!("clip v1.2.3 {}.mp4", "x".repeat(400));
+        let bounded = bound_filename(&name, 200);
+        assert!(bounded.len() <= 200);
+        assert!(bounded.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn truncation_does_not_leave_trailing_whitespace() {
+        let name = format!("{} {}.mp4", "a".repeat(190), "b".repeat(100));
+        let bounded = bound_filename(&name, 200);
+        let stem = bounded.trim_end_matches(".mp4");
+        assert_eq!(stem, stem.trim_end(), "stem should not end with whitespace");
+    }
 
     #[test]
     fn parses_real_ffprobe_output() {
