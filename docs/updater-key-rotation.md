@@ -169,7 +169,19 @@ print('是私鑰嗎？ :', 'secret key' in d.lower(), '<-- 必須是 False')
    echo "exit: $?"
    ```
 
-最終仍須以一次真實發佈驗證：從輪替前的版本觸發自動更新並完成安裝。設定看起來正確不等於更新能運作 —— 0.1.3 的教訓正是如此。
+5. **`createUpdaterArtifacts` 已啟用** —— 必須為 `True`：
+
+   ```bash
+   python3 -c "
+   import json,pathlib
+   b=json.loads(pathlib.Path('src-tauri/tauri.conf.json').read_text())['bundle']
+   print('createUpdaterArtifacts:', b.get('createUpdaterArtifacts'), '<-- 必須是 True')
+   "
+   ```
+
+   這個欄位**預設為 `false`**（`tauri-utils` 的 `impl Default for Updater` 回傳 `Bool(false)`）。關閉時整條簽章鏈都不會執行：不產生更新套件、不產生 `.sig`、也不產生 `latest.json`。金鑰再正確也沒有用，而建置全程是綠的。詳見文末事故的成因 4。
+
+最終仍須以一次真實發佈驗證：從輪替前的版本觸發自動更新並完成安裝。設定看起來正確不等於更新能運作 —— 0.1.3 的教訓正是如此。發佈流程中的 `verify-updater-manifest` job 會自動檢查 `latest.json` 是否確實產生且 endpoint 解析得到，但它驗證的是「更新資訊拿得到」，不能取代「更新裝得起來」的人工確認。
 
 ---
 
@@ -221,16 +233,20 @@ Key ID 可用於確認設定檔中的公鑰與手上的金鑰檔屬於同一對�
 
 **現象**：自動更新從發佈起從未對任何使用者成功過，且兩個月間沒有任何徵兆。
 
-**三個同時存在的成因**：
+**四個同時存在的成因**：
 
 1. `pubkey` 欄位填的是**私鑰**檔的內容。解碼後註解行為 `untrusted comment: rsign encrypted secret key`，且含 KDF 欄位 —— 這些只存在於私鑰檔。公鑰不可能驗證通過，因為填進去的根本不是公鑰。
 2. updater endpoint 指向 GitHub raw 上一個**從未進入版控**的 manifest 檔案，因此連取得更新資訊都會失敗。
 3. 前端的更新檢查把所有錯誤吞進**空的 catch**，導致上述兩個問題完全沒有徵兆。
+4. `bundle.createUpdaterArtifacts` **從未被設定**，而它預設是 `false`。整條簽章鏈因此完全沒有執行 —— v0.1.3 的六個資產裡沒有任何一個 `.sig`，`tauri-action` 也就不會產生 `latest.json`。這一項在 2026-07-29 修正 1 與 2 之後才被發現：前三項全部修好，endpoint 仍然是 404。
 
-**得到的三個教訓**：
+成因 4 是其中最難察覺的一個：它不產生任何錯誤訊息，三個平台的建置全部成功，release 也如期建立並附上六個安裝檔。唯一的徵兆是「本該存在的檔案不存在」，而沒有任何一步會去檢查它是否存在。
+
+**得到的四個教訓**：
 
 - 公鑰與私鑰的差異必須有**可執行的檢查**，不能靠肉眼看 base64。本文第 5 節的判別表與檢查指令即為此而寫。
 - 更新檢查的失敗路徑**必須留下 log**。靜默失敗會讓問題存活數個月。
 - 設定正確不等於功能正常，**必須以一次真實發佈端到端驗證**。
+- **對「應當產生的產物」要有斷言**，而不只對「不該發生的錯誤」有斷言。預設關閉的功能開關不會報錯，只會什麼都不做。`release.yml` 的 `verify-updater-manifest` job 就是把這個斷言自動化：缺 `latest.json`、缺 `.sig`、endpoint 解析不到、版號對不上、平台缺簽章，任一項都會讓發佈失敗。
 
 **附帶影響**：私鑰進入公開版控屬於須輪替等級的暴露。該私鑰有 passphrase 加密（passphrase 存於 GitHub Secrets 未外流），因此屬於「應盡快輪替、可離線暴力破解」，而非「已被攻破」。因當時自動更新對所有使用者皆未運作，輪替不影響任何既有安裝，代價為零。

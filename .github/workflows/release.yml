@@ -74,3 +74,69 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+  # 0.1.3 發佈時三個平台全部成功，但沒有任何 .sig 產生，因而也沒有 latest.json，
+  # 自動更新 endpoint 從發佈起就是 404 —— 兩個月無人察覺，因為建置本身是綠的。
+  # 「建置成功」不等於「更新可用」，所以在此對 endpoint 本身做一次驗證。
+  verify-updater-manifest:
+    needs: publish-tauri
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # tauri-action 以 tauri.conf.json 的 version 決定 tag，這裡用同一個來源推導，
+      # 才能同時適用於 tag push 與 workflow_dispatch（後者 ref_name 是分支不是 tag）。
+      - name: resolve release tag
+        id: tag
+        run: echo "tag=v$(jq -r .version src-tauri/tauri.conf.json)" >> "$GITHUB_OUTPUT"
+
+      - name: assert latest.json was attached to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$assets"
+          if ! grep -qx 'latest.json' <<<"$assets"; then
+            echo "::error::$TAG 沒有 latest.json。簽章未產生時 tauri-action 會靜默略過此檔，"
+            echo "::error::請確認 bundle.createUpdaterArtifacts 為 true，且兩個簽章 secret 都有效。"
+            exit 1
+          fi
+          if ! grep -q '\.sig$' <<<"$assets"; then
+            echo "::error::$TAG 沒有任何 .sig，更新套件未被簽章。"
+            exit 1
+          fi
+
+      # 資產存在不代表 app 取得到它：/releases/latest/ 會跳過 draft 與 prerelease，
+      # 而 app 內嵌的 endpoint 走的正是這條路徑。
+      - name: assert the updater endpoint actually resolves
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          # release 剛建立時 /releases/latest 的解析偶有延遲，重試而非立刻判定失敗。
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sL -o manifest.json -w '%{http_code}' "$url")
+            [ "$code" = "200" ] && break
+            echo "第 $attempt 次取得 $code，10 秒後重試"
+            sleep 10
+          done
+          if [ "$code" != "200" ]; then
+            echo "::error::$url 回應 $code。若資產存在卻仍 404，多半是該 release 被標為 prerelease 或 draft。"
+            exit 1
+          fi
+          jq -e '.version and .platforms and (.platforms | length > 0)' manifest.json > /dev/null
+          # 版號必須對得上這次發佈，否則代表 /releases/latest 指向的是舊的 release。
+          got=$(jq -r .version manifest.json)
+          if [ "$got" != "${TAG#v}" ]; then
+            echo "::error::latest.json 的版本是 $got，但這次發佈的是 ${TAG#v}。"
+            exit 1
+          fi
+          # 每個平台都必須帶簽章，否則該平台的使用者會在驗證階段失敗。
+          jq -e 'all(.platforms[]; .signature != null and .signature != "")' manifest.json > /dev/null
+          echo "updater manifest 驗證通過：$got"
+          jq -r '.platforms | keys[]' manifest.json
