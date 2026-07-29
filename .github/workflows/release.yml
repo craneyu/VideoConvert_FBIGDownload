@@ -119,24 +119,39 @@ jobs:
           set -euo pipefail
           url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
           # release 剛建立時 /releases/latest 的解析偶有延遲，重試而非立刻判定失敗。
+          # `|| code=000`：curl 遇到網路層錯誤（DNS、連線失敗）會回非零退出碼，
+          # 在 set -e 下會當場中止整個步驟 —— 重試不會發生，下方的診斷訊息也不會
+          # 印出。000 是 curl 表示「沒有收到 HTTP 回應」的慣例值。
           for attempt in 1 2 3 4 5; do
-            code=$(curl -sL -o manifest.json -w '%{http_code}' "$url")
+            code=$(curl -sL -o manifest.json -w '%{http_code}' "$url") || code=000
             [ "$code" = "200" ] && break
-            echo "第 $attempt 次取得 $code，10 秒後重試"
+            # 中文標點緊接變數時一律用 ${}：不加大括號時，變數名的邊界由 shell
+            # 對多位元組字元的處理決定，並非所有 shell 都會在此正確斷開。
+            echo "第 ${attempt} 次取得 ${code}，10 秒後重試"
             sleep 10
           done
           if [ "$code" != "200" ]; then
-            echo "::error::$url 回應 $code。若資產存在卻仍 404，多半是該 release 被標為 prerelease 或 draft。"
+            echo "::error::${url} 回應 ${code}。若資產存在卻仍 404，多半是該 release 被標為 prerelease 或 draft。"
             exit 1
           fi
-          jq -e '.version and .platforms and (.platforms | length > 0)' manifest.json > /dev/null
+          # 每個 jq 斷言都自帶訊息：靠 set -e 讓 jq 的退出碼中止步驟固然有效，
+          # 但 CI log 只會顯示「步驟失敗」而不說是哪一項不合格。
+          if ! jq -e '.version and .platforms and (.platforms | length > 0)' manifest.json > /dev/null 2>&1; then
+            echo "::error::latest.json 結構不完整，version 或 platforms 缺漏／為空。內容如下："
+            cat manifest.json
+            exit 1
+          fi
           # 版號必須對得上這次發佈，否則代表 /releases/latest 指向的是舊的 release。
           got=$(jq -r .version manifest.json)
           if [ "$got" != "${TAG#v}" ]; then
-            echo "::error::latest.json 的版本是 $got，但這次發佈的是 ${TAG#v}。"
+            echo "::error::latest.json 的版本是 ${got}，但這次發佈的是 ${TAG#v}。"
             exit 1
           fi
           # 每個平台都必須帶簽章，否則該平台的使用者會在驗證階段失敗。
-          jq -e 'all(.platforms[]; .signature != null and .signature != "")' manifest.json > /dev/null
-          echo "updater manifest 驗證通過：$got"
+          if ! jq -e 'all(.platforms[]; .signature != null and .signature != "")' manifest.json > /dev/null 2>&1; then
+            echo "::error::下列平台缺少簽章："
+            jq -r '.platforms | to_entries[] | select(.value.signature == null or .value.signature == "") | .key' manifest.json
+            exit 1
+          fi
+          echo "updater manifest 驗證通過：${got}，涵蓋平台："
           jq -r '.platforms | keys[]' manifest.json
