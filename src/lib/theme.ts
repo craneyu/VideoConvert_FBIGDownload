@@ -9,6 +9,8 @@
  * into the `data-theme` attribute, whose contract admits only `light` or `dark`.
  */
 
+import { getCurrentWindow } from '@tauri-apps/api/window';
+
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type ResolvedScheme = 'light' | 'dark';
 
@@ -81,6 +83,34 @@ export function applyScheme(scheme: ResolvedScheme): void {
 }
 
 /**
+ * Align the native window appearance with the selected mode.
+ *
+ * CSS `color-scheme` reaches in-page form controls and scrollbars, but the macOS
+ * `<select>` popup is a native NSMenu painted with the *window's* appearance,
+ * which no stylesheet can touch. Without this, dropdowns stay dark while the rest
+ * of a light theme renders correctly.
+ *
+ * Keyed on the mode, never on the resolved scheme, and `system` must pass `null`
+ * rather than the resolved value. In a WKWebView `prefers-color-scheme` derives
+ * from the window appearance, so forcing a concrete theme also overwrites the very
+ * signal `system` resolves against — pinning the window to light makes `matchMedia`
+ * report light forever, and `system` stops following the OS.
+ *
+ * Fire-and-forget: no Tauri host, or a missing capability, must not stop the
+ * document attribute from having been applied.
+ */
+function applyNativeAppearance(mode: ThemeMode, onSettled: () => void): void {
+	try {
+		void getCurrentWindow()
+			.setTheme(mode === 'system' ? null : mode)
+			.then(onSettled)
+			.catch(() => {});
+	} catch {
+		// getCurrentWindow() itself throws when there is no Tauri host.
+	}
+}
+
+/**
  * Run `onChange` whenever the OS colour scheme flips. Returns a teardown.
  */
 export function watchSystemScheme(onChange: (scheme: ResolvedScheme) => void): () => void {
@@ -101,7 +131,14 @@ export function watchSystemScheme(onChange: (scheme: ResolvedScheme) => void): (
  */
 export function syncTheme(mode: unknown): () => void {
 	const normalized = normalizeThemeMode(mode);
+
+	// setTheme is async, so the synchronous resolve below can still observe the
+	// appearance a previous explicit choice pinned the window to. Paint the best
+	// value available now, then re-resolve once the native appearance has settled —
+	// which is what makes switching back to `system` land on the real OS preference
+	// instead of the theme that was pinned a moment ago.
 	applyScheme(resolveTheme(normalized));
+	applyNativeAppearance(normalized, () => applyScheme(resolveTheme(normalized)));
 	// Only ever called with the authoritative value from the settings store, so
 	// this is also the point at which the pre-paint cache is refreshed and any
 	// divergence from SQLite is corrected.

@@ -6,7 +6,7 @@
 ## 2. 樣式層：variant 與原生控制項
 
 - [x] 2.1 依 design 決策「以 data-theme 屬性重新定義 dark: variant」，在 `src/app.css` 以 Tailwind v4 的 `@custom-variant` 把 `dark:` 從 `prefers-color-scheme` 媒體查詢改綁到 `<html>` 的 `data-theme="dark"`。交付契約：Resolved Theme Attribute Contract 的樣式端——呈現結果只由屬性決定，媒體查詢被完全繞過。驗證：`npm run dev` 後以 devtools 手動把 `<html>` 的 `data-theme` 在 `light` 與 `dark` 間切換，主畫面配色隨之改變，且此時將作業系統配色反向切換不影響畫面。
-- [ ] 2.2 依 design 決策「同步套用 color-scheme 讓原生控制項跟隨主題」，在 `src/app.css` 依 `data-theme` 屬性選擇器宣告對應的 `color-scheme`。交付契約：Native Control Color Scheme 成立——原生繪製的 UI 跟隨當前主題而非作業系統偏好。驗證：在系統為深色、`data-theme` 手動設為 `light` 的情況下，開啟主畫面轉檔選項的原生下拉選單，選單本身為淺色外觀；捲軸同樣為淺色。
+- [x] 2.2 依 design 決策「同步套用 color-scheme 讓原生控制項跟隨主題」，在 `src/app.css` 依 `data-theme` 屬性選擇器宣告對應的 `color-scheme`。交付契約：Native Control Color Scheme 成立——原生繪製的 UI 跟隨當前主題而非作業系統偏好。驗證：在系統為深色、`data-theme` 手動設為 `light` 的情況下，開啟主畫面轉檔選項的原生下拉選單，選單本身為淺色外觀；捲軸同樣為淺色。
 
 ## 3. 主題模組：解析與套用
 
@@ -21,9 +21,9 @@
 
 ## 5. 設定頁控制項
 
-- [ ] 5.1 在 `src/routes/settings/+page.svelte` 新增三段式主題選擇控制項，選項文案為「跟隨系統」、「淺色」、「深色」，並沿用該頁既有的互動回饋樣式。交付契約：Theme Mode Selection 的使用者入口——選擇後立即生效且重啟後保持，首次啟動（資料庫無 `theme` 鍵）等同「跟隨系統」，與本變更前行為一致。驗證：三個選項各選一次，畫面即時改變；每次選擇後重啟 App，選擇被保留；刪除資料庫 `settings` 表中的 `theme` 列後重啟，App 回到跟隨系統的行為。
+- [x] 5.1 在 `src/routes/settings/+page.svelte` 新增三段式主題選擇控制項，選項文案為「跟隨系統」、「淺色」、「深色」，並沿用該頁既有的互動回饋樣式。交付契約：Theme Mode Selection 的使用者入口——選擇後立即生效且重啟後保持，首次啟動（資料庫無 `theme` 鍵）等同「跟隨系統」，與本變更前行為一致。驗證：三個選項各選一次，畫面即時改變；每次選擇後重啟 App，選擇被保留；刪除資料庫 `settings` 表中的 `theme` 列後重啟，App 回到跟隨系統的行為。
 
 ## 6. 整體驗收
 
-- [ ] 6.1 執行完整驗收：`cargo test` 與 `npm run check` 皆通過；並依 design 的 Implementation Contract 逐條走過手動驗證矩陣（三段式切換即時生效與持久化、`system` 即時跟隨與固定模式不跟隨、深色啟動無閃屏、淺色下原生下拉選單為淺色外觀、非法快取值回退）。交付契約：本變更所有需求可觀察地成立。驗證：上述每一項手動斷言逐條確認通過，任一項失敗則回到對應任務修正。
-- [ ] 6.2 記錄實作過程中發現但不在本變更範圍內的淺色模式對比瑕疵（若有）。交付契約：Non-Goals 的邊界被實際遵守，發現的問題不被靜默吞掉也不擴張本變更。驗證：於本變更目錄留下一份條列清單，或在確認無瑕疵時明確記錄「無」。
+- [x] 6.1 執行完整驗收：`cargo test` 與 `npm run check` 皆通過；並依 design 的 Implementation Contract 逐條走過手動驗證矩陣（三段式切換即時生效與持久化、`system` 即時跟隨與固定模式不跟隨、深色啟動無閃屏、淺色下原生下拉選單為淺色外觀、非法快取值回退）。交付契約：本變更所有需求可觀察地成立。驗證：上述每一項手動斷言逐條確認通過，任一項失敗則回到對應任務修正。
+- [x] 6.2 記錄實作過程中發現但不在本變更範圍內的淺色模式對比瑕疵（若有）。交付契約：Non-Goals 的邊界被實際遵守，發現的問題不被靜默吞掉也不擴張本變更。驗證：於本變更目錄留下一份條列清單，或在確認無瑕疵時明確記錄「無」。

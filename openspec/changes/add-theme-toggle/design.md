@@ -21,7 +21,7 @@ App 使用 Tailwind v4.3（`src/app.css` 僅有 `@import "tailwindcss";`）。�
 - 不調整任何既有配色值。本變更只讓已存在的淺色樣式變得可達，不重新設計色板；`enhanced-ui-experience` 既有的深色對比需求不受影響。
 - 不提供自訂主題色、強調色或第三種配色方案。
 - 不提供依時間自動切換（日出日落排程）。
-- 不將主題狀態同步到 Rust 端供原生視窗裝飾使用；本變更範圍內主題僅影響 webview 內容。
+- 不提供獨立於主題之外的原生視窗外觀控制。主題會同步到原生視窗外觀（見下方決策），但那是為了讓原生控制項跟隨主題所需的最小手段，不額外開放視窗外觀設定。
 - 不補齊 `dark:` variant 覆蓋不全之處。若實作過程發現某元件在淺色模式下對比不足，記錄為後續問題，不在本變更修正。
 - 不引入前端測試框架。專案目前沒有任何前端測試 runner（`package.json` 無 vitest，亦無測試檔案），在主題切換這個範圍內建立測試基礎設施屬於範圍膨脹，應獨立成一個變更。因此前端邏輯的驗證以純函式抽出、`npm run check` 型別檢查與明確的手動斷言涵蓋。
 
@@ -71,6 +71,18 @@ App 使用 Tailwind v4.3（`src/app.css` 僅有 `@import "tailwindcss";`）。�
 僅設定 `data-theme` 不會影響瀏覽器繪製的原生 UI。主畫面的轉檔選項有兩個原生 `<select>`，設定頁亦有一個，捲軸同理；若不處理，淺色模式下會出現深色的原生下拉選單。
 
 因此 `data-theme` 套用時，同時設定 CSS 的 `color-scheme` 屬性為對應值（`light` 或 `dark`），由 `src/app.css` 依屬性選擇器提供。
+
+**實作期間修正：`color-scheme` 單獨不足。** 實測發現在深色 macOS 上把主題設為淺色時，`<select>` 的彈出選單仍為深色。原因是該選單並非由 webview 繪製，而是由 App 視窗外觀決定的原生 NSMenu，樣式表無法觸及；`color-scheme` 只影響頁內表單與捲軸。
+
+因此 `applyScheme` 除了寫入 `data-theme`，同時呼叫 `getCurrentWindow().setTheme()` 同步原生視窗外觀。此命令的權限 `core:window:allow-set-theme` **不在** `core:default` 內，必須顯式加入 `src-tauri/capabilities/default.json`。
+
+呼叫採 fire-and-forget 並包在 try/catch 中：沒有 Tauri 宿主（例如純瀏覽器環境）時 `getCurrentWindow()` 會直接拋出，而那不該讓已經寫好的 `data-theme` 失效。
+
+**關鍵細節：原生外觀必須依「模式」設定，且 `system` 要傳 `null`。** 在 WKWebView 中 `prefers-color-scheme` 是由**視窗外觀**推導而來，不是直接讀作業系統。若把解析後的具體值一律寫進 `setTheme`，就會覆寫 `system` 模式賴以判斷的信號——視窗被釘成淺色後 `matchMedia` 從此回報 light，使用者切回「跟隨系統」時會停在淺色再也不跟隨 OS。實測確實重現了此問題。
+
+因此 `setTheme` 的參數取自模式：`system` 傳 `null`（交還給作業系統），`light`／`dark` 才傳具體值。又因 `setTheme` 是非同步的，同一輪的同步解析仍會看到舊的視窗外觀，所以套用順序是「先以當下可得的值繪製，待原生外觀落定後再重新解析並套用一次」，不依賴 media query 事件自我修正。
+
+**替代方案：** 收斂需求，只保證 CSS 能做到的範圍並記錄 NSMenu 限制。已否決——淺色主題下出現深色下拉選單是使用者直接看得到的破格，且修法僅需一個既有 JS API 與一項權限。
 
 ## Implementation Contract
 
