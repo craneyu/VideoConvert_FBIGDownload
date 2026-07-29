@@ -138,12 +138,24 @@ export function syncTheme(mode: unknown): () => void {
 	// which is what makes switching back to `system` land on the real OS preference
 	// instead of the theme that was pinned a moment ago.
 	applyScheme(resolveTheme(normalized));
-	applyNativeAppearance(normalized, () => applyScheme(resolveTheme(normalized)));
+
+	// The settle callback outlives a fast mode switch: without this flag, the
+	// callback from a superseded mode would re-resolve against its own stale mode
+	// and repaint over the current one, leaving the final state dependent on the
+	// order the IPC replies happen to arrive in.
+	let cancelled = false;
+	applyNativeAppearance(normalized, () => {
+		if (!cancelled) applyScheme(resolveTheme(normalized));
+	});
+
 	// Only ever called with the authoritative value from the settings store, so
 	// this is also the point at which the pre-paint cache is refreshed and any
 	// divergence from SQLite is corrected.
 	cacheThemeMode(normalized);
 
-	if (normalized !== 'system') return () => {};
-	return watchSystemScheme(applyScheme);
+	const unwatch = normalized === 'system' ? watchSystemScheme(applyScheme) : () => {};
+	return () => {
+		cancelled = true;
+		unwatch();
+	};
 }
