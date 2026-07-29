@@ -105,9 +105,13 @@ jobs:
             echo "::error::請確認 bundle.createUpdaterArtifacts 為 true，且兩個簽章 secret 都有效。"
             exit 1
           fi
+          # .sig 只給 warning 而非擋下：更新能否運作取決於 latest.json 裡的
+          # signature 欄位（下一個步驟會逐一斷言），至於 tauri-action 是否另外
+          # 把 .sig 原始檔也上傳成 release 資產，屬於它的打包細節。以此擋下發佈
+          # 會誤殺一個自動更新其實正常的版本。留 warning 是因為 0.1.3 正是零
+          # .sig，這個訊號仍值得出現在 log 裡。
           if ! grep -q '\.sig$' <<<"$assets"; then
-            echo "::error::$TAG 沒有任何 .sig，更新套件未被簽章。"
-            exit 1
+            echo "::warning::$TAG 沒有任何 .sig 資產。若下一步的簽章斷言通過則不影響自動更新。"
           fi
 
       # 資產存在不代表 app 取得到它：/releases/latest/ 會跳過 draft 與 prerelease，

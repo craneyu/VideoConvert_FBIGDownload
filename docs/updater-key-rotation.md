@@ -183,6 +183,8 @@ print('是私鑰嗎？ :', 'secret key' in d.lower(), '<-- 必須是 False')
 
 最終仍須以一次真實發佈驗證：從輪替前的版本觸發自動更新並完成安裝。設定看起來正確不等於更新能運作 —— 0.1.3 的教訓正是如此。發佈流程中的 `verify-updater-manifest` job 會自動檢查 `latest.json` 是否確實產生且 endpoint 解析得到，但它驗證的是「更新資訊拿得到」，不能取代「更新裝得起來」的人工確認。
 
+> **verify job 的已知涵蓋範圍限制**：它 `needs: publish-tauri`，因此任一平台建置失敗時整個 job 不會執行；此時 workflow 是紅的，但 release 可能已建立並成為 `/releases/latest`，其 `latest.json` 只涵蓋成功的平台。job 也未斷言三個平台是否齊全。發佈後若看到 workflow 紅燈，請直接確認 release 的資產是否完整，不要只看 verify job 有沒有報錯 —— 它可能根本沒跑。
+
 ---
 
 ## 7. 步驟五：備份
