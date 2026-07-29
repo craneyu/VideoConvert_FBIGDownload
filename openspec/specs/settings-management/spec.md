@@ -111,6 +111,20 @@ The system MUST define and use default values for all supported settings when th
 | detect_clipboard   | true                   | Boolean flag                                 |
 | theme              | 'system'               | One of 'system', 'light', 'dark'; preserves pre-existing behavior of following the OS color scheme |
 
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
+
 ---
 ### Requirement: Enhanced Settings Interaction
 The settings interface SHALL provide immediate visual feedback for all user interactions to confirm that changes are being registered.
@@ -175,3 +189,17 @@ The generic `update_setting` command SHALL remain free of per-key validation; va
 
 - **WHEN** the application starts against a database created before the `theme` key existed
 - **THEN** `get_settings` SHALL succeed and report `theme` as `system`, without any schema change being applied
+
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->

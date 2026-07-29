@@ -20,6 +20,20 @@ The system SHALL provide three theme modes — `system`, `light`, and `dark` —
 - **WHEN** the application starts and no theme value has ever been stored
 - **THEN** the system SHALL behave as if `system` mode were selected, matching the behavior of releases that predate theme selection
 
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
+
 ---
 ### Requirement: Resolved Theme Attribute Contract
 
@@ -43,6 +57,20 @@ The `dark:` styling variant SHALL be driven by this attribute rather than by the
 | `system`      | dark          | `dark`             |
 | `system`      | light         | `light`            |
 
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
+
 ---
 ### Requirement: Following the Operating System Preference
 
@@ -57,6 +85,20 @@ While the selected mode is `system`, the system SHALL follow operating system co
 
 - **WHEN** the selected mode is `light` and the operating system color scheme changes from light to dark
 - **THEN** the interface SHALL continue to render with light colors
+
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
 
 ---
 ### Requirement: Theme Applied Before First Paint
@@ -75,6 +117,20 @@ Once the authoritative value has loaded, the system SHALL re-apply the color sch
 - **WHEN** the synchronous cache cannot be read, or holds a value that is not one of `system`, `light`, or `dark`
 - **THEN** the system SHALL fall back to the operating system color scheme preference for the pre-paint value, and SHALL NOT raise an error that interrupts page load
 
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
+
 ---
 ### Requirement: Native Control Color Scheme
 
@@ -84,6 +140,20 @@ The system SHALL declare the active color scheme to the browser engine so that n
 
 - **WHEN** the resolved color scheme is `light` and the user opens one of the transcoding option dropdowns
 - **THEN** the dropdown SHALL render with a light appearance
+
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
 
 ---
 ### Requirement: Invalid Theme Value Fallback
@@ -104,3 +174,17 @@ The system SHALL treat any stored theme value outside the set `system`, `light`,
 | `system`     | `system`      | valid                       |
 | (empty)      | `system`      | treated as absent           |
 | `sepia`      | `system`      | unrecognized, silent fallback |
+
+<!-- @trace
+source: add-theme-toggle
+updated: 2026-07-29
+code:
+  - src-tauri/capabilities/default.json
+  - src-tauri/src/commands/settings.rs
+  - src/app.css
+  - src/app.html
+  - src/lib/stores/settings.svelte.ts
+  - src/lib/theme.ts
+  - src/routes/+layout.svelte
+  - src/routes/settings/+page.svelte
+-->
