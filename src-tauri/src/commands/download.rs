@@ -106,6 +106,47 @@ pub fn parse_probe_json(raw: &str) -> Option<ProbeResult> {
     })
 }
 
+/// Does `file_name` look like the temporary download for `temp_id`?
+///
+/// The output template cannot pin the extension. yt-dlp names the file after the
+/// format it actually selected, so a YouTube source offering only VP9/Opus lands
+/// as `<id>.tmp.webm` — and when the template asked for `.mp4`, older yt-dlp
+/// appends its own extension instead, giving `<id>.tmp.mp4.webm`. Both shapes are
+/// accepted; matching on the prefix is what makes this independent of the format.
+///
+/// In-progress artefacts are excluded so a partial file is never handed to ffmpeg.
+pub fn is_temp_output(file_name: &str, temp_id: &str) -> bool {
+    file_name.starts_with(&format!("{}.tmp.", temp_id))
+        && !file_name.ends_with(".part")
+        && !file_name.ends_with(".ytdl")
+}
+
+/// Locate the file yt-dlp produced, whatever extension it chose.
+///
+/// Assuming `<id>.tmp.mp4` made ffprobe and ffmpeg read a path that does not
+/// exist: the download failed with "No such file or directory" after the bytes
+/// had already been fetched, and cleanup missed the real file, leaving a
+/// multi-gigabyte orphan in the download folder.
+///
+/// The largest match wins, so a leftover per-format fragment cannot be mistaken
+/// for the merged result.
+fn resolve_temp_output(dir: &std::path::Path, temp_id: &str) -> Option<std::path::PathBuf> {
+    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_temp_output(name, temp_id) {
+            continue;
+        }
+        let size = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        match &best {
+            Some((best_size, _)) if size <= *best_size => {}
+            _ => best = Some((size, entry.path())),
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
 /// Decide between remuxing and re-encoding.
 ///
 /// Remuxing is only chosen when every whitelist condition holds: H.264 video,
@@ -227,10 +268,11 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .map_err(|e| format!("Failed to create directory: {}", e))?;
 
     // Step 1: Download using yt-dlp (Get best quality available)
-    // We use a temporary filename to ensure we can re-encode it safely
+    // We use a temporary filename to ensure we can re-encode it safely.
+    // The extension is left to yt-dlp — see resolve_temp_output for why.
     let temp_id = uuid::Uuid::new_v4().to_string();
-    let temp_output = target_dir.join(format!("{}.tmp.mp4", temp_id));
-    let temp_output_str = temp_output.to_string_lossy().to_string();
+    let temp_template = target_dir.join(format!("{}.tmp.%(ext)s", temp_id));
+    let temp_template_str = temp_template.to_string_lossy().to_string();
 
     let mut child = hidden_cmd(&yt_dlp_path)
         .arg("--newline")
@@ -239,7 +281,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("--ffmpeg-location")
         .arg(&ffmpeg_path)
         .arg("-o")
-        .arg(&temp_output_str)
+        .arg(&temp_template_str)
         .arg("--no-playlist")
         .arg("--user-agent")
         .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -291,9 +333,17 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         });
     }
 
-    // Get the final filename that yt-dlp actually used (it might have changed extension or added suffix)
-    // Since we forced -o with a specific tmp name, it should be exactly that.
-    
+    // Which extension yt-dlp settled on is only knowable after the fact, so the
+    // file has to be looked up rather than assumed.
+    let temp_output = resolve_temp_output(&target_dir, &temp_id).ok_or_else(|| {
+        format!(
+            "yt-dlp reported success but left no {}.tmp.* file in {}",
+            temp_id,
+            target_dir.display()
+        )
+    })?;
+    let temp_output_str = temp_output.to_string_lossy().to_string();
+
     // Step 2: Get the intended title for the final file
     let output = hidden_cmd(&yt_dlp_path)
         .arg("--get-filename")
@@ -715,6 +765,49 @@ mod tests {
         let bounded = bound_filename(&name, 200);
         let stem = bounded.trim_end_matches(".mp4");
         assert_eq!(stem, stem.trim_end(), "stem should not end with whitespace");
+    }
+
+    // Locating yt-dlp's output. A YouTube download landed as
+    // `<id>.tmp.mp4.webm` while ffprobe and ffmpeg were handed `<id>.tmp.mp4`,
+    // so the download failed after fetching 2.37 GB and the file was orphaned.
+
+    const TEMP_ID: &str = "0bced93f-cff1-4263-9b86-a39f5df97b08";
+
+    #[test]
+    fn temp_output_is_found_whatever_extension_yt_dlp_chose() {
+        for ext in ["mp4", "webm", "mkv", "m4a"] {
+            let name = format!("{}.tmp.{}", TEMP_ID, ext);
+            assert!(is_temp_output(&name, TEMP_ID), "{} should match", name);
+        }
+    }
+
+    #[test]
+    fn the_youtube_download_that_failed_is_recognised() {
+        // The exact name left on disk by the failing download.
+        assert!(is_temp_output(
+            "0bced93f-cff1-4263-9b86-a39f5df97b08.tmp.mp4.webm",
+            TEMP_ID
+        ));
+    }
+
+    #[test]
+    fn incomplete_downloads_are_not_treated_as_the_output() {
+        // Handing a .part file to ffmpeg would produce a truncated video.
+        assert!(!is_temp_output(&format!("{}.tmp.webm.part", TEMP_ID), TEMP_ID));
+        assert!(!is_temp_output(&format!("{}.tmp.mp4.ytdl", TEMP_ID), TEMP_ID));
+    }
+
+    #[test]
+    fn another_downloads_temp_file_is_ignored() {
+        // Concurrent downloads share the directory, so the id must be respected.
+        let other = "ffffffff-0000-0000-0000-000000000000";
+        assert!(!is_temp_output(&format!("{}.tmp.mp4", other), TEMP_ID));
+    }
+
+    #[test]
+    fn the_final_video_is_not_treated_as_the_temp_file() {
+        assert!(!is_temp_output("My Holiday Clip.mp4", TEMP_ID));
+        assert!(!is_temp_output(&format!("{}.mp4", TEMP_ID), TEMP_ID));
     }
 
     // Revealing a file in Explorer. Measured on Windows 11: with the path passed
