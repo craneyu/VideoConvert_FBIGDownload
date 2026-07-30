@@ -1,10 +1,4 @@
-# app-auto-update Specification
-
-## Purpose
-
-TBD - created by archiving change 'auto-update-mechanism'. Update Purpose after archive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Automatic Update Check
 
@@ -27,6 +21,7 @@ The system SHALL check for available updates upon application startup by retriev
 - **THEN** the published manifest filename SHALL equal the filename requested by the configured updater endpoint
 
 ---
+
 ### Requirement: Secure Update Installation
 
 The system SHALL verify the update payload against a minisign public key before proceeding with the installation. The verification key stored in application configuration SHALL be a public key: its decoded content SHALL NOT contain key-derivation-function fields (salt, operations limit, memory limit) and its comment line SHALL NOT identify it as a secret key. The corresponding private key SHALL NOT be stored in version control, and SHALL be supplied to the release process exclusively through repository secrets.
