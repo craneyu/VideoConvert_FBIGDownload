@@ -7,6 +7,7 @@ use tauri_plugin_sql::DbInstances;
 use serde::Serialize;
 use serde_json::Value;
 use regex::Regex;
+use crate::commands::codec_support::DecodeSupport;
 use crate::commands::concurrency::{run_blocking, SharedCpuBudget};
 use crate::commands::utils::{find_tool_path, hidden_cmd};
 
@@ -38,6 +39,29 @@ const DOWNLOAD_PHASE_CEILING: f64 = 90.0;
 /// must not spill into the band post-processing reports in.
 pub fn download_phase_progress(percent: f64) -> f64 {
     (percent / 100.0).clamp(0.0, 1.0) * DOWNLOAD_PHASE_CEILING
+}
+
+/// The ffmpeg audio options for a re-encode.
+///
+/// Copying is not an optimisation here, it is the correct answer: re-encoding audio
+/// that is already AAC costs a second generation of lossy compression *and* makes
+/// the file bigger. Measured on a real Reel, a 59959 bps AAC source came out at
+/// 128385 bps — more bytes for worse audio.
+///
+/// `None` means the probe could not be read at all. That is deliberately treated as
+/// "encode", not "copy": an unknown codec might not be something MP4 can carry.
+/// A probe that succeeded and found no audio stream yields no options, because there
+/// is nothing to encode or copy.
+pub fn audio_args(probe: Option<&ProbeResult>) -> Vec<&'static str> {
+    const ENCODE: [&str; 4] = ["-c:a", "aac", "-b:a", "128k"];
+    let Some(probe) = probe else {
+        return ENCODE.to_vec();
+    };
+    match probe.audio_codec.as_deref() {
+        None => Vec::new(),
+        Some(codec) if codec.eq_ignore_ascii_case("aac") => vec!["-c:a", "copy"],
+        Some(_) => ENCODE.to_vec(),
+    }
 }
 
 /// Is this plan expensive enough to be billed against the shared CPU budget?
@@ -222,29 +246,82 @@ fn resolve_temp_output(dir: &std::path::Path, temp_id: &str) -> Option<std::path
     best.map(|(_, path)| path)
 }
 
+/// What the user asked us to do with a downloaded video's streams.
+///
+/// A typed value rather than the raw setting string: the decision function is where
+/// getting this wrong silently produces the wrong file, so an unrecognised name must
+/// not be able to reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoHandling {
+    /// Keep the original when the platform is known to decode it.
+    Auto,
+    /// Always keep the original stream.
+    Original,
+    /// Always re-encode to H.264.
+    Compat,
+}
+
+impl VideoHandling {
+    /// Read the stored setting. Anything unrecognised becomes `Auto`, matching the
+    /// settings layer's own fallback so the two cannot disagree.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "original" => VideoHandling::Original,
+            "compat" => VideoHandling::Compat,
+            _ => VideoHandling::Auto,
+        }
+    }
+}
+
 /// Decide between remuxing and re-encoding.
 ///
-/// Remuxing is only chosen when every whitelist condition holds: H.264 video,
-/// AAC audio or no audio at all, and even pixel dimensions. `None` (unparseable
-/// probe output) is deliberately conservative and re-encodes, because an
-/// unplayable output is far worse than a slow one.
-pub fn plan_post_processing(probe: Option<&ProbeResult>) -> PostProcessPlan {
+/// Three inputs together: what the file is, what the user asked for, and whether the
+/// platform says it can decode the file's video codec.
+///
+/// Eligibility comes first and is independent of policy — a file whose audio is not
+/// AAC, whose dimensions are odd, or whose video codec is not one we can remux into
+/// MP4 is re-encoded whatever the policy says. `None` (unparseable probe output) is
+/// deliberately conservative and re-encodes, because an unplayable output is far
+/// worse than a slow one.
+///
+/// Among eligible files, H.264 is remuxed under every policy — it is already the
+/// compatible codec, so `Compat` has nothing to gain by re-encoding it. AV1 is
+/// remuxed under `Original`, never under `Compat`, and under `Auto` only when the
+/// platform answered `Supported`; `Unsupported` and `Unknown` both re-encode, so a
+/// platform we could not ask never yields a file that might not play.
+pub fn plan_post_processing(
+    probe: Option<&ProbeResult>,
+    policy: VideoHandling,
+    codec_support: DecodeSupport,
+) -> PostProcessPlan {
     let Some(probe) = probe else {
         return PostProcessPlan::ReEncode;
     };
 
-    let video_ok = probe.video_codec.eq_ignore_ascii_case("h264");
     let audio_ok = match probe.audio_codec.as_deref() {
         None => true,
         Some(codec) => codec.eq_ignore_ascii_case("aac"),
     };
     let dimensions_ok =
         probe.width > 0 && probe.height > 0 && probe.width % 2 == 0 && probe.height % 2 == 0;
+    if !audio_ok || !dimensions_ok {
+        return PostProcessPlan::ReEncode;
+    }
 
-    if video_ok && audio_ok && dimensions_ok {
-        PostProcessPlan::Remux
-    } else {
-        PostProcessPlan::ReEncode
+    let codec = probe.video_codec.as_str();
+    if codec.eq_ignore_ascii_case("h264") {
+        return PostProcessPlan::Remux;
+    }
+    if !codec.eq_ignore_ascii_case("av1") {
+        // Not a codec we can put in an MP4 with predictable playability.
+        return PostProcessPlan::ReEncode;
+    }
+
+    match policy {
+        VideoHandling::Compat => PostProcessPlan::ReEncode,
+        VideoHandling::Original => PostProcessPlan::Remux,
+        VideoHandling::Auto if codec_support.is_supported() => PostProcessPlan::Remux,
+        VideoHandling::Auto => PostProcessPlan::ReEncode,
     }
 }
 
@@ -372,6 +449,10 @@ struct DownloadedFile {
     temp_output: std::path::PathBuf,
     final_output_str: String,
     plan: PostProcessPlan,
+    /// What `ffprobe` reported. Carried through because the re-encode path needs the
+    /// audio codec to decide whether the audio can be copied. `None` means the probe
+    /// could not be read.
+    probe: Option<ProbeResult>,
     /// `None` means post-processing cannot report incremental progress.
     duration_secs: Option<f64>,
 }
@@ -388,6 +469,7 @@ fn run_network_phase(
     ffmpeg_path: &str,
     target_dir: &std::path::Path,
     temp_id: &str,
+    policy: VideoHandling,
 ) -> Result<DownloadedFile, String> {
     // Step 1: Download using yt-dlp (Get best quality available)
     // We use a temporary filename to ensure we can re-encode it safely.
@@ -503,7 +585,13 @@ fn run_network_phase(
     let probe = ffprobe_path
         .as_deref()
         .and_then(|ffprobe_path| probe_media(ffprobe_path, &temp_output_str));
-    let plan = plan_post_processing(probe.as_ref());
+    // Queried here rather than passed in because it needs the codec we just probed.
+    // The call is memoised, so this costs a map lookup after the first download.
+    let codec_support = probe
+        .as_ref()
+        .map(|p| crate::commands::codec_support::video_decode_support(&p.video_codec))
+        .unwrap_or(DecodeSupport::Unknown);
+    let plan = plan_post_processing(probe.as_ref(), policy, codec_support);
     // Needed to turn ffmpeg's elapsed output time into a percentage. `None` simply
     // means post-processing reports no incremental progress.
     let duration_secs = ffprobe_path
@@ -514,6 +602,7 @@ fn run_network_phase(
         temp_output,
         final_output_str: final_output.to_string_lossy().to_string(),
         plan,
+        probe,
         duration_secs,
     })
 }
@@ -567,10 +656,7 @@ fn run_post_process(
                 .arg("yuv420p")
                 .arg("-vf")
                 .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2") // Force even dimensions for QuickTime
-                .arg("-c:a")
-                .arg("aac")
-                .arg("-b:a")
-                .arg("128k");
+                .args(audio_args(file.probe.as_ref()));
         }
     }
 
@@ -678,6 +764,12 @@ pub async fn download_video(
 
     let temp_id = uuid::Uuid::new_v4().to_string();
 
+    // Read before the blocking phase: the policy decides what post-processing does,
+    // and the database is not reachable from inside spawn_blocking.
+    let policy = VideoHandling::from_setting(
+        &crate::commands::settings::video_handling_or_default(&db_instances).await,
+    );
+
     let file = {
         let app = app.clone();
         let id = id.clone();
@@ -694,6 +786,7 @@ pub async fn download_video(
                 &ffmpeg_path,
                 &target_dir,
                 &temp_id,
+                policy,
             )
         })
         .await??
@@ -844,56 +937,159 @@ mod tests {
     #[test]
     fn h264_aac_even_dimensions_is_remuxed() {
         let p = probe("h264", Some("aac"), 1920, 1080);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::Remux);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::Remux);
     }
 
     #[test]
     fn h264_without_audio_stream_is_remuxed() {
         let p = probe("h264", None, 1080, 1080);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::Remux);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::Remux);
     }
 
     #[test]
     fn non_aac_audio_is_re_encoded() {
         let p = probe("h264", Some("opus"), 1920, 1080);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::ReEncode);
     }
 
     #[test]
     fn non_h264_video_is_re_encoded() {
         let p = probe("vp9", Some("aac"), 1920, 1080);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::ReEncode);
     }
 
     #[test]
     fn odd_width_is_re_encoded() {
         let p = probe("h264", Some("aac"), 1919, 1080);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::ReEncode);
     }
 
     #[test]
     fn odd_height_is_re_encoded() {
         let p = probe("h264", Some("aac"), 1920, 1079);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::ReEncode);
     }
 
     #[test]
     fn unparseable_probe_output_is_re_encoded() {
-        assert_eq!(plan_post_processing(None), PostProcessPlan::ReEncode);
+        assert_eq!(plan_post_processing(None, VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::ReEncode);
     }
 
     // Codec names from ffprobe are compared case-insensitively.
     #[test]
     fn codec_comparison_ignores_case() {
         let p = probe("H264", Some("AAC"), 1920, 1080);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::Remux);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::Remux);
     }
 
     // Zero dimensions mean ffprobe gave us nothing usable.
     #[test]
     fn zero_dimensions_are_re_encoded() {
         let p = probe("h264", Some("aac"), 0, 0);
-        assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+        assert_eq!(plan_post_processing(Some(&p), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::ReEncode);
+    }
+
+    // Audio handling. Re-encoding audio that is already AAC produces a larger file
+    // with worse audio: a real Reel's 59959 bps AAC source became 128385 bps.
+
+    /// The decision table from the video-download-engine spec, verbatim.
+    #[test]
+    fn audio_decision_follows_the_probed_codec() {
+        let cases: [(Option<&str>, Vec<&str>); 4] = [
+            (Some("aac"), vec!["-c:a", "copy"]),
+            (None, vec![]),
+            (Some("opus"), vec!["-c:a", "aac", "-b:a", "128k"]),
+            (Some("mp3"), vec!["-c:a", "aac", "-b:a", "128k"]),
+        ];
+        for (audio, expected) in cases {
+            let p = probe("h264", audio, 1920, 1080);
+            assert_eq!(audio_args(Some(&p)), expected, "audio codec {:?}", audio);
+        }
+    }
+
+    #[test]
+    fn aac_is_matched_case_insensitively() {
+        // ffprobe has been observed reporting codec names in either case.
+        let p = probe("h264", Some("AAC"), 1920, 1080);
+        assert_eq!(audio_args(Some(&p)), vec!["-c:a", "copy"]);
+    }
+
+    #[test]
+    fn unreadable_probe_output_encodes_the_audio() {
+        // The spec table covers a probed file. When the probe itself failed we do
+        // not know what the audio is, so the conservative choice is to encode —
+        // copying an unknown codec could produce a stream MP4 cannot carry.
+        assert_eq!(audio_args(None), vec!["-c:a", "aac", "-b:a", "128k"]);
+    }
+
+    // The policy matrix from the video-download-engine spec, verbatim. Eligibility
+    // is checked before policy, so an ineligible file re-encodes whatever was asked.
+
+    #[test]
+    fn the_policy_matrix_matches_the_spec() {
+        use DecodeSupport::{Supported, Unknown, Unsupported};
+        use PostProcessPlan::{ReEncode, Remux};
+        use VideoHandling::{Auto, Compat, Original};
+
+        // (video, audio, w, h, policy, platform answer, expected)
+        let rows: [(&str, Option<&str>, u32, u32, VideoHandling, DecodeSupport, PostProcessPlan); 11] = [
+            ("h264", Some("aac"),  1920, 1080, Auto,     Unknown,     Remux),
+            ("h264", None,         1080, 1080, Compat,   Unknown,     Remux),
+            ("h264", Some("opus"), 1920, 1080, Original, Supported,   ReEncode),
+            ("h264", Some("aac"),  1919, 1080, Original, Supported,   ReEncode),
+            ("av1",  Some("aac"),  1080, 1920, Auto,     Supported,   Remux),
+            ("av1",  Some("aac"),  1080, 1920, Auto,     Unsupported, ReEncode),
+            ("av1",  Some("aac"),  1080, 1920, Auto,     Unknown,     ReEncode),
+            ("av1",  Some("aac"),  1080, 1920, Original, Unknown,     Remux),
+            ("av1",  Some("aac"),  1080, 1920, Compat,   Supported,   ReEncode),
+            ("av1",  Some("aac"),  1081, 1920, Original, Supported,   ReEncode),
+            ("vp9",  Some("aac"),  1920, 1080, Original, Supported,   ReEncode),
+        ];
+
+        for (video, audio, w, h, policy, support, expected) in rows {
+            let p = probe(video, audio, w, h);
+            assert_eq!(
+                plan_post_processing(Some(&p), policy, support),
+                expected,
+                "{} / {:?} / {}x{} / {:?} / {:?}",
+                video, audio, w, h, policy, support
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_probe_re_encodes_under_every_policy() {
+        // The last row of the spec table: policy cannot rescue a file we could not read.
+        for policy in [VideoHandling::Auto, VideoHandling::Original, VideoHandling::Compat] {
+            assert_eq!(
+                plan_post_processing(None, policy, DecodeSupport::Supported),
+                PostProcessPlan::ReEncode,
+                "policy {:?}",
+                policy
+            );
+        }
+    }
+
+    #[test]
+    fn av1_is_matched_case_insensitively() {
+        // ffprobe reports `av1`, but the comparison must not depend on that.
+        let p = probe("AV1", Some("aac"), 1080, 1920);
+        assert_eq!(
+            plan_post_processing(Some(&p), VideoHandling::Original, DecodeSupport::Unknown),
+            PostProcessPlan::Remux
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_setting_value_becomes_auto() {
+        // Mirrors the settings layer's own fallback so the two cannot disagree about
+        // what an unknown policy name means.
+        for value in ["", "always", "ORIGINAL", "remux"] {
+            assert_eq!(VideoHandling::from_setting(value), VideoHandling::Auto, "value {:?}", value);
+        }
+        assert_eq!(VideoHandling::from_setting("original"), VideoHandling::Original);
+        assert_eq!(VideoHandling::from_setting("compat"), VideoHandling::Compat);
+        assert_eq!(VideoHandling::from_setting("auto"), VideoHandling::Auto);
     }
 
     // Which plans are billed against the shared CPU budget. Remuxing is a stream
@@ -918,10 +1114,10 @@ mod tests {
         let compatible = probe("h264", Some("aac"), 1920, 1080);
         let incompatible = probe("av01", Some("opus"), 1920, 1080);
 
-        assert!(!needs_cpu_permit(plan_post_processing(Some(&compatible))));
-        assert!(needs_cpu_permit(plan_post_processing(Some(&incompatible))));
+        assert!(!needs_cpu_permit(plan_post_processing(Some(&compatible), VideoHandling::Auto, DecodeSupport::Supported)));
+        assert!(needs_cpu_permit(plan_post_processing(Some(&incompatible), VideoHandling::Auto, DecodeSupport::Supported)));
         // Unreadable probe output re-encodes to be safe, so it is billed.
-        assert!(needs_cpu_permit(plan_post_processing(None)));
+        assert!(needs_cpu_permit(plan_post_processing(None, VideoHandling::Auto, DecodeSupport::Supported)));
     }
 
     // The network phase's progress band. The waiting-for-encode status is reported
@@ -979,7 +1175,7 @@ mod tests {
         ]}"#;
         let parsed = parse_probe_json(raw).expect("should parse");
         assert_eq!(parsed.audio_codec, None);
-        assert_eq!(plan_post_processing(Some(&parsed)), PostProcessPlan::Remux);
+        assert_eq!(plan_post_processing(Some(&parsed), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::Remux);
     }
 
     #[test]
@@ -1307,6 +1503,6 @@ mod tests {
         // The end-to-end point of task 6.3: a real H.264/AAC file must take the
         // remux path, not fall back to re-encoding.
         let parsed = parse_probe_json(REAL_FFPROBE_OUTPUT).expect("real ffprobe output must parse");
-        assert_eq!(plan_post_processing(Some(&parsed)), PostProcessPlan::Remux);
+        assert_eq!(plan_post_processing(Some(&parsed), VideoHandling::Auto, DecodeSupport::Supported), PostProcessPlan::Remux);
     }
 }

@@ -11,6 +11,18 @@ use sqlx::Row;
 /// "light" or "dark".
 const VALID_THEMES: [&str; 3] = ["system", "light", "dark"];
 
+/// How a downloaded video's streams should be handled after the download.
+///
+/// `auto` decides per download from the platform's decode capability. It is stored
+/// as `auto` and never rewritten to the resolved answer — freezing a one-off probe
+/// into a permanent setting would leave a stale value behind after the user changes
+/// machine, upgrades the OS, or installs a decoder, and they would have no reason to
+/// go and correct it.
+const VALID_VIDEO_HANDLING: [&str; 3] = ["auto", "original", "compat"];
+
+/// Keep the original streams only when the platform is known to decode them.
+pub const DEFAULT_VIDEO_HANDLING: &str = "auto";
+
 /// How many downloads run their network phase at once.
 ///
 /// Three rather than the previous two: the network phase is cheap to parallelise,
@@ -55,6 +67,7 @@ pub struct Settings {
     pub theme: String,
     pub max_network_concurrency: u32,
     pub max_cpu_concurrency: u32,
+    pub download_video_handling: String,
 }
 
 impl Default for Settings {
@@ -71,6 +84,7 @@ impl Default for Settings {
             theme: "system".to_string(),
             max_network_concurrency: DEFAULT_NETWORK_CONCURRENCY,
             max_cpu_concurrency: DEFAULT_CPU_CONCURRENCY,
+            download_video_handling: DEFAULT_VIDEO_HANDLING.to_string(),
         }
     }
 }
@@ -111,6 +125,15 @@ impl Settings {
                 "max_cpu_concurrency" => {
                     if let Some(limit) = parse_concurrency(&value, &CPU_CONCURRENCY_RANGE) {
                         self.max_cpu_concurrency = limit;
+                    }
+                }
+                // Same contract as `theme`: an unrecognised policy leaves the default
+                // standing and is not corrected in the database. Matched exactly, so
+                // a differently-cased name is rejected rather than silently accepted
+                // — the value is compared against this list elsewhere too.
+                "download_video_handling" => {
+                    if VALID_VIDEO_HANDLING.contains(&value.as_str()) {
+                        self.download_video_handling = value;
                     }
                 }
                 _ => {}
@@ -157,6 +180,18 @@ pub async fn cpu_concurrency_or_default(db_instances: &DbInstances) -> u32 {
         .await
         .map(|settings| settings.max_cpu_concurrency)
         .unwrap_or(DEFAULT_CPU_CONCURRENCY)
+}
+
+/// The configured video handling policy, or the default when settings cannot be read.
+///
+/// Falling back to the default keeps a download working when the database is not
+/// loaded yet; `auto` is itself the conservative choice on a platform that cannot be
+/// interrogated, so this fallback never widens what gets kept.
+pub async fn video_handling_or_default(db_instances: &DbInstances) -> String {
+    load_settings(db_instances)
+        .await
+        .map(|settings| settings.download_video_handling)
+        .unwrap_or_else(|_| DEFAULT_VIDEO_HANDLING.to_string())
 }
 
 #[tauri::command]
@@ -323,6 +358,48 @@ mod tests {
         ]);
         assert_eq!(merged.max_network_concurrency, 3, "rejected, so default");
         assert_eq!(merged.max_cpu_concurrency, 2, "accepted independently");
+    }
+
+    // Download video handling policy. Unlike the concurrency limits this is a
+    // closed set of names, so it is validated with an allowlist like `theme`.
+
+    #[test]
+    fn video_handling_defaults_to_auto() {
+        assert_eq!(Settings::default().download_video_handling, "auto");
+    }
+
+    #[test]
+    fn video_handling_accepts_the_three_policies() {
+        for value in ["auto", "original", "compat"] {
+            let merged = Settings::default()
+                .merge(vec![("download_video_handling".to_string(), value.to_string())]);
+            assert_eq!(merged.download_video_handling, value, "policy {:?}", value);
+        }
+    }
+
+    #[test]
+    fn unrecognized_video_handling_falls_back_to_auto() {
+        // A hand-edited database, or a policy a future version removed, must not
+        // reach the decision logic as an unknown name.
+        for value in ["", "always", "ORIGINAL", "remux"] {
+            let merged = Settings::default()
+                .merge(vec![("download_video_handling".to_string(), value.to_string())]);
+            assert_eq!(
+                merged.download_video_handling, "auto",
+                "unrecognized policy {:?} must fall back to auto",
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn auto_is_never_rewritten_to_a_resolved_value() {
+        // `auto` must survive as `auto`. Storing the resolved answer would freeze a
+        // one-off platform probe into a permanent setting the user has no reason to
+        // revisit after changing machine or installing a decoder.
+        let merged = Settings::default()
+            .merge(vec![("download_video_handling".to_string(), "auto".to_string())]);
+        assert_eq!(merged.download_video_handling, "auto");
     }
 
     #[test]
