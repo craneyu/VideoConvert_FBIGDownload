@@ -236,64 +236,64 @@ change `fix-updater-signing-t1-bugs-and-remux` 的任務 7.1（提升版本號�
 
 ---
 
-## J. 下載影片的處理方式 — Windows 的自動判斷**尚未實作**
+## J. 下載影片的處理方式 — Windows 的自動判斷
 
-macOS 以 VideoToolbox 查詢平台能否解碼 AV1，能解就直接保留原始串流（免重新編碼、
-畫質無損、檔案更小）。**Windows 目前一律回「未知」**，因此自動判斷會保守地走重新
-編碼 —— 行為與此功能加入前相同。
+Windows 以 `MFTEnumEx` 列舉 Media Foundation 註冊的視訊解碼器：找得到就回
+supported、列舉成功但沒有就回 unsupported、列舉本身失敗才回 unknown。而**只有
+supported 算許可**，所以 unsupported 與 unknown 都會保守地重新編碼。
 
-之所以延後：理想做法是列舉 Media Foundation 的解碼器，但 `MFTEnumEx` 是 COM API，
-需要額外依賴，而此專案的 Windows target 無法在 macOS 上編譯（見 A 節），所以那段
-程式碼在撰寫的機器上既無法編譯也無法驗證行為。誠實回「未知」只是少拿到改善；寫下
-未經驗證的 COM 程式碼則可能產出播不了的檔案。
+**列舉刻意不過濾硬體旗標，軟體解碼也算 supported。** 要回答的問題是「這台機器能不能
+解這個編碼」，軟體解碼確實能播。這使 Windows 比 macOS 寬鬆 —— macOS 用
+`VTIsHardwareDecodeSupported`，只認硬體解碼 —— 因此**同一台機器在兩個系統上的答案
+可能相反**（沒有 AV1 硬體解碼但裝了擴充的機器，Windows 回 supported、macOS 回
+unsupported）。這是規格明文允許的差異，不是 bug：兩個方向都不會把「播不了」報成
+supported。
 
-要驗的是「現況是否如預期」，而不是自動判斷是否正確：
+要驗的是**自動判斷是否正確**。答案取決於機器裝了什麼，所以有兩種環境要各驗一次。
 
-1. 開啟「軟體設定 → 轉檔品質配置」，找到「下載影片的處理方式」。
-2. 選「自動判斷」，確認說明文字為 **「未能確認本機可解碼 AV1 → 重新編碼為 H.264」**。
-   若顯示「本機可解碼 AV1」，表示 Windows 分支被誤接到 macOS 實作，屬 bug。
-3. 下載一支 Facebook Reel（1080p 來源為 AV1），確認：
-   - 後處理狀態文字為「正在重新編碼以確保相容性...」
-   - 以 `ffprobe` 檢查輸出，視訊 codec 為 `h264`
-   - **音訊位元率與來源相同**（來源已是 AAC 時不應被重新編碼）
-4. 切到「保留原檔」再下載同一支，確認：
-   - 狀態文字為「正在進行容器最佳化...」且幾乎瞬間完成
-   - 輸出視訊 codec 為 `av1`、檔案大小接近下載到的原檔
-   - 在該台 Windows 上嘗試播放該檔案。**播不了是預期的**（除非是 Windows 11 24H2+
-     或已安裝 AV1 Video Extension）—— 這正是自動判斷保守走重編的理由。
+### J-A. 有 AV1 解碼能力的機器（Windows 11 24H2+ 內建，或已裝 AV1 Video Extension）
 
-之後若要補上 Windows 的自動判斷，需要在有／無 AV1 解碼支援的兩種 Windows 環境各驗
-一次「自動判斷」的解析結果與實際輸出 codec。
-
-### J 實測結果（Windows 11 25H2，build 26200）
-
-以一支真實 Facebook Reel 驗完第 3、4 步。來源正是本節假設的情境：**av1（Main）+
-HE-AAC，1080×1920，9.38 秒，2,068,245 bytes**。兩條路徑都是直接執行 `run_post_process`
-組出的同一組 ffmpeg 參數：
-
-| | 自動判斷（→ 重新編碼） | 保留原檔（→ 容器最佳化） |
+| 測試 | 步驟 | 預期 |
 | --- | --- | --- |
-| 輸出視訊 codec | **h264** ✅ | **av1** ✅ |
-| 音訊 | 88,709 bps HE-AAC，**與來源完全相同** ✅（確實走 `-c:a copy`） | 同左 ✅ |
+| J-1 設定頁文字 | 「軟體設定 → 轉檔品質配置 → 下載影片的處理方式」選「自動判斷」 | 綠字 **「本機可解碼 AV1 → 保留原始畫質」**。若顯示「未能確認…」，表示列舉沒找到解碼器，先確認擴充是否真的安裝 |
+| J-2 自動判斷保留原檔 | 下載一支 1080p 來源為 AV1 的 Facebook Reel | 狀態文字為「正在進行容器最佳化...」且幾乎瞬間完成；`ffprobe` 顯示輸出視訊 codec 為 **`av1`**、檔案大小接近下載到的原檔；**音訊位元率與來源相同** |
+| J-3 覆寫仍有效 | 切到「相容優先」再下載同一支 | 狀態文字為「正在重新編碼以確保相容性...」；輸出 codec 為 **`h264`**，但音訊位元率**仍與來源相同**（AAC 來源一律 `-c:a copy`，重編只換視訊） |
+
+J-2 保留下來的 AV1 檔案在**這台**機器上能播，但帶到不支援 AV1 的裝置上可能不行 ——
+偵測只反映下載的這台機器。這正是「相容優先」存在的理由，設定頁也有對應警語。
+
+### J-B. 沒有 AV1 解碼能力的機器
+
+這一側**已由 CI 自動覆蓋**：`.github/workflows/test.yml` 在 `windows-latest` 上跑
+`cargo test --lib`，而 GitHub runner 沒有 AV1 Video Extension，
+`windows_answers_definitively_for_a_mapped_codec` 因此在該環境驗到的是 unsupported
+那一側。不需要為此準備第二台機器。
+
+若仍想在實機驗一次：移除 `Microsoft.AV1VideoExtension` 後**必須重啟 App** —— 能力
+查詢每個行程只做一次並快取，不重啟不會反映。預期自動判斷回到「正在重新編碼以確保
+相容性...」、輸出 codec 為 `h264`，設定頁文字變回「未能確認本機可解碼 AV1 →
+重新編碼為 H.264」。驗完記得從 Microsoft Store 裝回。
+
+### 對照基準：0.1.6（Windows 尚未實作自動判斷時）的實測數據
+
+下表是 Windows 還一律回 unknown 時，在 Windows 11 25H2（build 26200）上以一支真實
+Facebook Reel 量到的兩條路徑。來源為 **av1（Main）+ HE-AAC，1080×1920，9.38 秒，
+2,068,245 bytes**。留在這裡當基準：J-2 現在應該落在右欄，而 0.1.6 落在左欄。
+
+| | 重新編碼（0.1.6 的自動判斷） | 容器最佳化（現在的自動判斷） |
+| --- | --- | --- |
+| 輸出視訊 codec | h264 | **av1** |
+| 音訊 | 88,709 bps HE-AAC，與來源完全相同（`-c:a copy`） | 同左 |
 | 耗時 | 5.41 秒 | **0.07 秒**（77 倍差距） |
 | 檔案大小 | 4,115,940 bytes（**比原檔大 99%**） | 2,068,245 bytes（與原檔相同） |
 
-兩點與原本敘述不同，值得記下：
+那個 +99% 值得記住：設計文件原本記的是「大 53%」，這支直式 Reel 實際翻倍。這就是
+Windows 補上自動判斷所省下的代價。
 
-- **重編的膨脹比設計文件記的更大。** 文件記的是「大 53%」，這支直式 Reel 實際翻倍
-  （+99%）。也就是自動判斷在 Windows 上保守重編的代價，比原先評估的更高。
-- **這台機器播得動 AV1**，所以第 4 步最後一項的「播不了是預期的」在此屬於括號裡註明
-  的例外。此機為 25H2 且已安裝 `Microsoft.AV1VideoExtension 2.0.24.0`（軟體解碼）。
-  驗法不是靠「裝了擴充所以應該可以」推論，而是直接呼叫 Windows 自己的 Media
-  Foundation 縮圖提供者（`IShellItemImageFactory`，加 `SIIGBF_THUMBNAILONLY` 禁止退回
-  通用圖示）解出一張真實畫格。附帶一筆：此機 **沒有** AV1 硬體解碼路徑，
-  `ffmpeg -hwaccel d3d11va` 對 AV1 回 "Your platform doesn't support hardware
-  accelerated AV1 decoding"。
-
-**這對日後補實作的影響**：若用 `MFTEnumEx` 列舉，這台機器會回 `Supported`（有軟體解碼
-MFT），但 macOS 的 `VTIsHardwareDecodeSupported` 只認硬體解碼、在同樣硬體上會回
-`Unsupported` —— 同一台機器在兩套語意下答案相反。所以動手前要先決定**軟體解碼算不算
-`Supported`**，這比 COM 依賴本身更需要先講清楚。
+驗證機的解碼能力細節，供對照：25H2、已裝 `Microsoft.AV1VideoExtension 2.0.24.0`
+（**軟體**解碼），但 **沒有** AV1 硬體解碼路徑 —— `ffmpeg -hwaccel d3d11va` 對 AV1 回
+"Your platform doesn't support hardware accelerated AV1 decoding"。也就是說這台機器
+正是前面說的「兩個系統答案相反」的例子。
 
 ## 建置安裝檔（可選）
 

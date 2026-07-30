@@ -36,6 +36,20 @@ uuid = { version = "1.23.1", features = ["v4"] }
 # this adds no download or build weight.
 tokio = { version = "1", features = ["sync"] }
 
+[target.'cfg(windows)'.dependencies]
+# Needed only for the Media Foundation decoder enumeration behind the AV1 decode
+# capability query. Like the tokio entry above this is a transitive dependency
+# promoted to a direct one — tauri already builds windows 0.61.3 on this target, so
+# nothing new is downloaded and no second major version enters Cargo.lock. The two
+# features do compile additional bindings, which is the whole cost.
+#
+# Do not widen the feature list casually: every added feature is bindings this
+# project compiles on every Windows build.
+windows = { version = "0.61.3", features = [
+    "Win32_Media_MediaFoundation", # MFTEnumEx, MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_*
+    "Win32_System_Com",            # CoTaskMemFree, to release what MFTEnumEx allocates
+] }
+
 [dev-dependencies]
 # Only the tests need to drive time: proving that a second permit stays pending
 # while the first is held requires a timeout rather than a sleep race.

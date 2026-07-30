@@ -1,0 +1,55 @@
+name: "test"
+
+# Runs on every push and pull request, unlike `publish` which only fires on a v*
+# tag. Two reasons this has to exist separately:
+#
+# 1. Platform-gated code is only compiled on its own platform. The Windows decode
+#    capability query sits behind #[cfg(target_os = "windows")], so a macOS-only
+#    development machine cannot compile it, let alone run its tests. The same is
+#    true in reverse for the VideoToolbox branch.
+# 2. Capability detection has an answer that depends on the machine. A GitHub
+#    runner carries no AV1 Video Extension, which makes it the "no decoder
+#    installed" environment — the half a developer desktop with the extension
+#    cannot produce. Verifying that half by uninstalling the extension locally
+#    would mean changing a real machine's codec installation for one test run.
+#
+# `publish` keeps its own copy of the Windows test step as a release gate. The
+# duplication is deliberate: this workflow is for fast feedback, that one is for
+# "do not ship if the tests fail".
+#
+# Linux is absent because the project's release matrix has no Linux target, and
+# its capability branch answers unknown unconditionally.
+# push is deliberately unfiltered rather than limited to main: a branch gets pushed
+# long before it becomes a pull request, and this is the feedback that has to arrive
+# early. pull_request is kept so the result also lands as a check on the PR page.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  cargo-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - "windows-latest"
+          - "macos-latest"
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # --lib only: the unit tests need no WebView2, no bundled binary, and no
+      # frontend build, so nothing here depends on npm or tauri-action.
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --lib
