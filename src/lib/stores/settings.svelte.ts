@@ -9,7 +9,23 @@ export interface Settings {
     // The backend narrows this to the same three values before it ever reaches
     // here, so the union is a faithful description rather than an optimistic one.
     theme: ThemeMode;
+    // How many downloads run their network phase at once. Read live by the
+    // download queue, so a change applies without a restart.
+    max_network_concurrency: number;
+    // How many re-encodes run at once, shared by the download and transcoding
+    // pipelines. The permit pool is built at startup, so a change applies on the
+    // next launch.
+    max_cpu_concurrency: number;
 }
+
+// Mirrors the ranges the backend accepts when merging stored settings. The
+// backend is authoritative — it falls back to the default for anything outside
+// these — and these values exist so the inputs cannot offer a value that would be
+// silently discarded.
+export const CONCURRENCY_RANGES = {
+    max_network_concurrency: { min: 1, max: 8 },
+    max_cpu_concurrency: { min: 1, max: 2 }
+} as const;
 
 class SettingsStore {
     settings = $state<Settings | null>(null);

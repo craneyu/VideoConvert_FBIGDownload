@@ -2,10 +2,12 @@ use std::collections::VecDeque;
 use std::process::Stdio;
 use std::io::{BufRead, BufReader};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_sql::DbInstances;
 use serde::Serialize;
 use serde_json::Value;
 use regex::Regex;
+use crate::commands::concurrency::{run_blocking, SharedCpuBudget};
 use crate::commands::utils::{find_tool_path, hidden_cmd};
 
 /// How many trailing stderr lines to keep from a spawned tool, so a failure can
@@ -16,6 +18,39 @@ const STDERR_TAIL_LINES: usize = 20;
 /// user (and acceptance testing) observes which post-processing path was taken.
 const STATUS_REMUX: &str = "正在進行容器最佳化...";
 const STATUS_REENCODE: &str = "正在重新編碼以確保相容性...";
+/// Reported while the download waits for a CPU permit.
+///
+/// Distinct from `STATUS_REENCODE` on purpose: nothing is happening to the file
+/// yet, and several downloads can sit here at once. Without a wording that reads
+/// as queued, they all appear stuck at the same progress value.
+const STATUS_QUEUED_FOR_ENCODE: &str = "已下載完成，等待編碼中...";
+
+/// Top of the band reserved for yt-dlp's own progress.
+///
+/// Named rather than inlined because the waiting-for-encode status is reported at
+/// exactly this value — the file is fully downloaded, and no post-processing has
+/// started.
+const DOWNLOAD_PHASE_CEILING: f64 = 90.0;
+
+/// Map yt-dlp's own percentage onto the network phase's band.
+///
+/// Clamped: yt-dlp can report slightly over 100% when it merges formats, and that
+/// must not spill into the band post-processing reports in.
+pub fn download_phase_progress(percent: f64) -> f64 {
+    (percent / 100.0).clamp(0.0, 1.0) * DOWNLOAD_PHASE_CEILING
+}
+
+/// Is this plan expensive enough to be billed against the shared CPU budget?
+///
+/// Only re-encoding is. Remuxing copies streams without decoding or encoding, so
+/// requiring a permit would make a near-instant operation queue behind an
+/// expensive one for no benefit.
+pub fn needs_cpu_permit(plan: PostProcessPlan) -> bool {
+    match plan {
+        PostProcessPlan::Remux => false,
+        PostProcessPlan::ReEncode => true,
+    }
+}
 
 /// The progress band reserved for post-processing. yt-dlp's own progress is
 /// mapped onto 0–90, and 95 is emitted once the plan is known.
@@ -332,30 +367,35 @@ pub async fn fetch_video_info(url: String) -> Result<String, String> {
     Ok(title)
 }
 
-#[tauri::command]
-pub async fn download_video(app: AppHandle, id: String, url: String, download_dir: String, source: String, auto_organize: bool) -> Result<String, String> {
-    let yt_dlp_path = find_tool_path("yt-dlp").ok_or("yt-dlp not found")?;
-    let ffmpeg_path = find_tool_path("ffmpeg").ok_or("ffmpeg not found")?;
+/// What the network phase produced, and how it must be finished.
+struct DownloadedFile {
+    temp_output: std::path::PathBuf,
+    final_output_str: String,
+    plan: PostProcessPlan,
+    /// `None` means post-processing cannot report incremental progress.
+    duration_secs: Option<f64>,
+}
 
-    let target_dir = if auto_organize {
-        std::path::PathBuf::from(&download_dir)
-            .join("VidBridge")
-            .join(&source)
-    } else {
-        std::path::PathBuf::from(&download_dir)
-    };
-    
-    std::fs::create_dir_all(&target_dir)
-        .map_err(|e| format!("Failed to create directory: {}", e))?;
-
+/// Fetch the video and decide how it must be turned into the final MP4.
+///
+/// Network-bound work plus two short probes. Nothing here is billed against the
+/// CPU budget, which is why the plan has to be known by the time this returns.
+fn run_network_phase(
+    app: &AppHandle,
+    id: &str,
+    url: &str,
+    yt_dlp_path: &str,
+    ffmpeg_path: &str,
+    target_dir: &std::path::Path,
+    temp_id: &str,
+) -> Result<DownloadedFile, String> {
     // Step 1: Download using yt-dlp (Get best quality available)
     // We use a temporary filename to ensure we can re-encode it safely.
     // The extension is left to yt-dlp — see resolve_temp_output for why.
-    let temp_id = uuid::Uuid::new_v4().to_string();
     let temp_template = target_dir.join(format!("{}.tmp.%(ext)s", temp_id));
     let temp_template_str = temp_template.to_string_lossy().to_string();
 
-    let mut child = hidden_cmd(&yt_dlp_path)
+    let mut child = hidden_cmd(yt_dlp_path)
         .arg("--newline")
         .arg("--progress")
         // Without this yt-dlp writes in the console code page, so a message
@@ -364,13 +404,13 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("utf-8")
         .arg("--no-check-certificates")
         .arg("--ffmpeg-location")
-        .arg(&ffmpeg_path)
+        .arg(ffmpeg_path)
         .arg("-o")
         .arg(&temp_template_str)
         .arg("--no-playlist")
         .arg("--user-agent")
         .arg("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .arg(&url)
+        .arg(url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -393,12 +433,10 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
                 let speed = speed_re.captures(&line)
                     .map(|c| c[1].to_string())
                     .unwrap_or_else(|| "N/A".to_string());
-                
-                // Map yt-dlp progress to 0-90% range to leave room for re-encoding
-                let display_progress = progress * 0.9;
+
                 let _ = app.emit("download-progress", ProgressPayload {
-                    id: id.clone(),
-                    progress: display_progress,
+                    id: id.to_string(),
+                    progress: download_phase_progress(progress),
                     speed,
                 });
             }
@@ -420,7 +458,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
 
     // Which extension yt-dlp settled on is only knowable after the fact, so the
     // file has to be looked up rather than assumed.
-    let temp_output = resolve_temp_output(&target_dir, &temp_id).ok_or_else(|| {
+    let temp_output = resolve_temp_output(target_dir, temp_id).ok_or_else(|| {
         format!(
             "yt-dlp reported success but left no {}.tmp.* file in {}",
             temp_id,
@@ -430,7 +468,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     let temp_output_str = temp_output.to_string_lossy().to_string();
 
     // Step 2: Get the intended title for the final file
-    let output = hidden_cmd(&yt_dlp_path)
+    let output = hidden_cmd(yt_dlp_path)
         .arg("--get-filename")
         .arg("-o")
         .arg("%(title)s.mp4") // Force .mp4 extension for final
@@ -442,7 +480,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("--encoding")
         .arg("utf-8")
         .arg("--no-playlist")
-        .arg(&url)
+        .arg(url)
         .output()
         .map_err(|e| format!("Failed to get title: {}", e))?;
 
@@ -456,11 +494,11 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     let base_name = bound_filename(&base_name, MAX_FILENAME_BYTES);
 
     let final_output = target_dir.join(&base_name);
-    let final_output_str = final_output.to_string_lossy().to_string();
 
-    // Step 3: Produce the final MP4. Facebook and Instagram sources are usually
-    // already H.264/AAC, where a container remux is effectively instant and
-    // lossless; re-encoding is the fallback for anything else.
+    // Facebook and Instagram sources are usually already H.264/AAC, where a
+    // container remux is effectively instant and lossless; re-encoding is the
+    // fallback for anything else. The decision is made here, before any permit is
+    // requested, because only the re-encode path is billed.
     let ffprobe_path = find_tool_path("ffprobe");
     let probe = ffprobe_path
         .as_deref()
@@ -472,16 +510,37 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .as_deref()
         .and_then(|ffprobe_path| probe_duration_secs(ffprobe_path, &temp_output_str));
 
+    Ok(DownloadedFile {
+        temp_output,
+        final_output_str: final_output.to_string_lossy().to_string(),
+        plan,
+        duration_secs,
+    })
+}
+
+/// Produce the final MP4 from the downloaded file.
+///
+/// The caller holds a CPU permit for the whole of this when `file.plan` is a
+/// re-encode.
+fn run_post_process(
+    app: &AppHandle,
+    id: &str,
+    ffmpeg_path: &str,
+    file: &DownloadedFile,
+) -> Result<String, String> {
+    let temp_output_str = file.temp_output.to_string_lossy().to_string();
+    let status_text = match file.plan {
+        PostProcessPlan::Remux => STATUS_REMUX,
+        PostProcessPlan::ReEncode => STATUS_REENCODE,
+    };
+
     let _ = app.emit("download-progress", ProgressPayload {
-        id: id.clone(),
-        progress: 95.0,
-        speed: match plan {
-            PostProcessPlan::Remux => STATUS_REMUX.to_string(),
-            PostProcessPlan::ReEncode => STATUS_REENCODE.to_string(),
-        },
+        id: id.to_string(),
+        progress: POST_PROCESS_START,
+        speed: status_text.to_string(),
     });
 
-    let mut ffmpeg_cmd = hidden_cmd(&ffmpeg_path);
+    let mut ffmpeg_cmd = hidden_cmd(ffmpeg_path);
     ffmpeg_cmd
         .arg("-y") // Overwrite if exists
         .arg("-i")
@@ -491,7 +550,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("-map")
         .arg("0:a?"); // Include audio if present
 
-    match plan {
+    match file.plan {
         PostProcessPlan::Remux => {
             // Stream copy: no decode, no encode, no quality loss.
             ffmpeg_cmd.arg("-c").arg("copy");
@@ -525,7 +584,7 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
         .arg("-progress")
         .arg("pipe:1")
         .arg("-nostats")
-        .arg(&final_output_str)
+        .arg(&file.final_output_str)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -545,22 +604,18 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     // Reading to EOF here also drains the pipe, so ffmpeg cannot block on a full
     // one, and it doubles as waiting for the work to finish.
     if let Some(stdout) = ffmpeg_child.stdout.take() {
-        let status = match plan {
-            PostProcessPlan::Remux => STATUS_REMUX,
-            PostProcessPlan::ReEncode => STATUS_REENCODE,
-        };
         for chunk in BufReader::new(stdout).split(b'\n') {
             let Ok(bytes) = chunk else { break };
             let Some(out_time) = parse_progress_out_time(&String::from_utf8_lossy(&bytes)) else {
                 continue;
             };
-            let Some(duration) = duration_secs else { continue };
+            let Some(duration) = file.duration_secs else { continue };
             let _ = app.emit(
                 "download-progress",
                 ProgressPayload {
-                    id: id.clone(),
+                    id: id.to_string(),
                     progress: post_process_progress(out_time, duration),
-                    speed: status.to_string(),
+                    speed: status_text.to_string(),
                 },
             );
         }
@@ -572,10 +627,10 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     let _ = ffmpeg_reader.join();
 
     // Cleanup temp file
-    let _ = std::fs::remove_file(&temp_output);
+    let _ = std::fs::remove_file(&file.temp_output);
 
     if !ffmpeg_status.success() {
-        let phase = match plan {
+        let phase = match file.plan {
             PostProcessPlan::Remux => "Container optimization (remux) failed",
             PostProcessPlan::ReEncode => "Compatibility optimization (re-encoding) failed",
         };
@@ -588,12 +643,100 @@ pub async fn download_video(app: AppHandle, id: String, url: String, download_di
     }
 
     let _ = app.emit("download-progress", ProgressPayload {
-        id: id.clone(),
+        id: id.to_string(),
         progress: 100.0,
         speed: "完成".to_string(),
     });
 
-    Ok(final_output_str)
+    Ok(file.final_output_str.clone())
+}
+
+#[tauri::command]
+pub async fn download_video(
+    app: AppHandle,
+    id: String,
+    url: String,
+    download_dir: String,
+    source: String,
+    auto_organize: bool,
+    db_instances: State<'_, DbInstances>,
+    cpu_budget: State<'_, SharedCpuBudget>,
+) -> Result<String, String> {
+    let yt_dlp_path = find_tool_path("yt-dlp").ok_or("yt-dlp not found")?;
+    let ffmpeg_path = find_tool_path("ffmpeg").ok_or("ffmpeg not found")?;
+
+    let target_dir = if auto_organize {
+        std::path::PathBuf::from(&download_dir)
+            .join("VidBridge")
+            .join(&source)
+    } else {
+        std::path::PathBuf::from(&download_dir)
+    };
+
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Failed to create directory: {}", e))?;
+
+    let temp_id = uuid::Uuid::new_v4().to_string();
+
+    let file = {
+        let app = app.clone();
+        let id = id.clone();
+        let url = url.clone();
+        let yt_dlp_path = yt_dlp_path.clone();
+        let ffmpeg_path = ffmpeg_path.clone();
+        let target_dir = target_dir.clone();
+        run_blocking("Download", move || {
+            run_network_phase(
+                &app,
+                &id,
+                &url,
+                &yt_dlp_path,
+                &ffmpeg_path,
+                &target_dir,
+                &temp_id,
+            )
+        })
+        .await??
+    };
+
+    // The network slot is free from this point: the bytes are on disk. Only a
+    // re-encode is billed against the shared CPU budget — a remux copies streams
+    // and starts immediately, however busy the encoders are.
+    let _permit = if needs_cpu_permit(file.plan) {
+        // Announced before the wait, not after it. The frontend uses this to stop
+        // counting the task as downloading, so the next queued download can start,
+        // and the user sees a task that is queued rather than a progress bar that
+        // stopped moving.
+        let _ = app.emit(
+            "download-progress",
+            ProgressPayload {
+                id: id.clone(),
+                progress: DOWNLOAD_PHASE_CEILING,
+                speed: STATUS_QUEUED_FOR_ENCODE.to_string(),
+            },
+        );
+
+        let limit = crate::commands::settings::cpu_concurrency_or_default(&db_instances).await;
+        match cpu_budget.acquire(limit).await {
+            Ok(permit) => Some(permit),
+            Err(error) => {
+                // The download already succeeded, so its bytes are on disk. They
+                // must not be left behind — a merged 4K video is several
+                // gigabytes, and nothing else knows this file exists.
+                let _ = std::fs::remove_file(&file.temp_output);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let app_for_post = app.clone();
+    let id_for_post = id.clone();
+    run_blocking("Post-processing", move || {
+        run_post_process(&app_for_post, &id_for_post, &ffmpeg_path, &file)
+    })
+    .await?
 }
 
 #[tauri::command]
@@ -751,6 +894,70 @@ mod tests {
     fn zero_dimensions_are_re_encoded() {
         let p = probe("h264", Some("aac"), 0, 0);
         assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+    }
+
+    // Which plans are billed against the shared CPU budget. Remuxing is a stream
+    // copy — no decode, no encode — so making it queue behind a re-encode would
+    // price a near-instant operation as if it were an expensive one.
+
+    #[test]
+    fn re_encoding_needs_a_cpu_permit() {
+        assert!(needs_cpu_permit(PostProcessPlan::ReEncode));
+    }
+
+    #[test]
+    fn remuxing_does_not_need_a_cpu_permit() {
+        assert!(!needs_cpu_permit(PostProcessPlan::Remux));
+    }
+
+    #[test]
+    fn the_permit_decision_follows_the_existing_plan() {
+        // Fed from the existing decision function rather than from a hand-written
+        // plan, so the two cannot drift apart: an H.264/AAC file is remuxed and
+        // therefore unbilled, and anything else is re-encoded and billed.
+        let compatible = probe("h264", Some("aac"), 1920, 1080);
+        let incompatible = probe("av01", Some("opus"), 1920, 1080);
+
+        assert!(!needs_cpu_permit(plan_post_processing(Some(&compatible))));
+        assert!(needs_cpu_permit(plan_post_processing(Some(&incompatible))));
+        // Unreadable probe output re-encodes to be safe, so it is billed.
+        assert!(needs_cpu_permit(plan_post_processing(None)));
+    }
+
+    // The network phase's progress band. The waiting-for-encode status is reported
+    // at its ceiling, so the value has to be a named quantity rather than a magic
+    // number spread across the emit sites.
+
+    #[test]
+    fn download_progress_spans_the_network_band() {
+        assert_eq!(download_phase_progress(0.0), 0.0);
+        assert_eq!(download_phase_progress(50.0), 45.0);
+        assert_eq!(download_phase_progress(100.0), DOWNLOAD_PHASE_CEILING);
+    }
+
+    #[test]
+    fn download_progress_never_exceeds_its_band() {
+        // yt-dlp has been observed reporting slightly over 100% on merged formats;
+        // that must not spill into the band reserved for post-processing.
+        assert_eq!(download_phase_progress(101.0), DOWNLOAD_PHASE_CEILING);
+    }
+
+    #[test]
+    fn the_network_band_ends_below_the_post_processing_band() {
+        // If these ever overlap, progress would move backwards when the encode
+        // starts.
+        assert!(
+            DOWNLOAD_PHASE_CEILING < POST_PROCESS_START,
+            "network band must end before post-processing begins"
+        );
+    }
+
+    #[test]
+    fn the_waiting_status_names_the_wait_rather_than_the_work() {
+        // The user sees this while nothing is happening to their file yet, so it
+        // has to read as queued, not as in progress.
+        assert!(STATUS_QUEUED_FOR_ENCODE.contains("等待"), "{}", STATUS_QUEUED_FOR_ENCODE);
+        assert_ne!(STATUS_QUEUED_FOR_ENCODE, STATUS_REENCODE);
     }
 
     #[test]

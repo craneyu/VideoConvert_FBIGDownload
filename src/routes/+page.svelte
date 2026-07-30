@@ -15,7 +15,11 @@
     id: string;
     url: string;
     title: string;
-    status: 'pending' | 'fetching' | 'downloading' | 'completed' | 'failed';
+    // 'waiting-encode' means the bytes are on disk and the task is queued for a
+    // CPU permit. It is deliberately not a network-active state: a task sitting
+    // here must not occupy a download slot, or the queue would stall behind an
+    // encode that has nothing to do with the network.
+    status: 'pending' | 'fetching' | 'downloading' | 'waiting-encode' | 'completed' | 'failed';
     progress: number;
     speed: string;
     source: 'Facebook' | 'Instagram' | 'YouTube' | 'Unknown';
@@ -26,11 +30,53 @@
     id: string;
     inputPath: string;
     fileName: string;
-    status: 'pending' | 'processing' | 'completed' | 'failed';
+    // 'waiting' means the command has been invoked and is queued for a CPU permit.
+    // The backend owns that queue, so the task leaves this state when the first
+    // progress event arrives rather than when the frontend decides it should.
+    status: 'pending' | 'waiting' | 'processing' | 'completed' | 'failed';
     progress: number;
     time: string;
     outputPath?: string;
   }
+
+  // The status text the backend reports while a download waits for a CPU permit.
+  //
+  // MUST match STATUS_QUEUED_FOR_ENCODE in src-tauri/src/commands/download.rs. The
+  // progress event's payload shape is unchanged, so the phase is carried in its
+  // status text — the same way the remux and re-encode phases already are.
+  const BACKEND_STATUS_QUEUED_FOR_ENCODE = "已下載完成，等待編碼中...";
+
+  // Statuses that occupy one of the network download slots. Everything outside
+  // this set — including a task queued for encoding — leaves its slot free.
+  const NETWORK_ACTIVE_STATUSES: ReadonlyArray<DownloadTask['status']> = ['fetching', 'downloading'];
+
+  // Statuses whose card shows a progress bar and the backend's status text. A task
+  // queued for encoding belongs here: its bar sits at the end of the download band
+  // and the status text is the only thing explaining why it stopped moving.
+  const PROGRESS_VISIBLE_STATUSES: ReadonlyArray<DownloadTask['status']> = [
+    'downloading',
+    'waiting-encode'
+  ];
+
+  // Labels for the status chip. The raw status value used to be rendered, which put
+  // internal identifiers on screen; 'waiting-encode' in particular has to read as
+  // queued rather than as a hyphenated identifier.
+  const DOWNLOAD_STATUS_LABEL: Record<DownloadTask['status'], string> = {
+    pending: '等待中',
+    fetching: '解析中',
+    downloading: '下載中',
+    'waiting-encode': '等待編碼',
+    completed: '已完成',
+    failed: '失敗'
+  };
+
+  const TRANSCODE_STATUS_LABEL: Record<TranscodeTask['status'], string> = {
+    pending: '待處理',
+    waiting: '等待編碼',
+    processing: '轉檔中',
+    completed: '已完成',
+    failed: '失敗'
+  };
 
   // --- App State ---
   let activeTab = $state("download"); // "download" | "transcode" | "history"
@@ -100,7 +146,17 @@
 
 
   // Config
-  const MAX_CONCURRENT_DOWNLOADS = 2;
+  //
+  // The download limit is a setting, not a constant: it was previously hardcoded
+  // here and displayed as separate hardcoded text in the sidebar, so the two had
+  // to be kept in step by hand. Both now read the same value.
+  //
+  // `?? 3` covers the window before settings finish loading and mirrors the
+  // backend default; it is not a second place to configure the limit.
+  const maxConcurrentDownloads = $derived(settingsStore.settings?.max_network_concurrency ?? 3);
+  // Only used for display. The limit itself is enforced by the backend's permit
+  // pool, which is the only thing that can see both pipelines at once.
+  const maxConcurrentEncodes = $derived(settingsStore.settings?.max_cpu_concurrency ?? 1);
   let globalOptions = $state({
     preset: "balanced",
     resolution: "original",
@@ -182,6 +238,17 @@
         task.progress = event.payload.progress;
         task.speed = event.payload.speed;
         if (task.status === 'fetching') task.status = 'downloading';
+
+        if (event.payload.speed === BACKEND_STATUS_QUEUED_FOR_ENCODE) {
+          // The network phase is over, so the slot is free — start the next
+          // download now rather than when this task finishes encoding, which can
+          // be minutes away.
+          task.status = 'waiting-encode';
+          processQueue();
+        } else if (task.status === 'waiting-encode') {
+          // Any other status text means encoding actually started.
+          task.status = 'downloading';
+        }
       }
     });
 
@@ -190,6 +257,11 @@
       if (task) {
         task.progress = event.payload.progress;
         task.time = event.payload.time;
+        // The backend queues transcodes behind the shared CPU budget, so the task
+        // is only really running once it reports progress. Flipping on invoke
+        // instead would show "processing" for a task that is still queued —
+        // possibly behind a download's re-encode, which the frontend cannot see.
+        if (task.status === 'waiting') task.status = 'processing';
       }
     });
 
@@ -212,6 +284,27 @@
       for (const unlisten of unlisteners) unlisten();
       unlisteners.length = 0;
     };
+  });
+
+  // Raising the download limit has to take effect on its own.
+  //
+  // processQueue() otherwise only runs when a task is added or finishes, and
+  // neither happens because a setting changed — so a user who raised the limit
+  // while downloads were already running would see nothing happen until one of
+  // them completed.
+  //
+  // Only an increase can free capacity, so a decrease is ignored here; already
+  // running downloads are left alone rather than interrupted.
+  let lastSeenDownloadLimit = $state(0);
+  $effect(() => {
+    const limit = maxConcurrentDownloads;
+    if (limit > lastSeenDownloadLimit) {
+      lastSeenDownloadLimit = limit;
+      // One call starts one task, so ask once per newly available slot.
+      for (let i = 0; i < limit; i += 1) processQueue();
+    } else {
+      lastSeenDownloadLimit = limit;
+    }
   });
 
   // --- Clipboard Detection Logic ---
@@ -294,8 +387,10 @@
       setTimeout(processQueue, 500);
       return;
     }
-    const activeCount = downloadTasks.filter(t => t.status === 'fetching' || t.status === 'downloading').length;
-    if (activeCount >= MAX_CONCURRENT_DOWNLOADS) return;
+    // A task queued for encoding has finished with the network, so it is not
+    // counted here — otherwise a slot would stay occupied for the whole encode.
+    const activeCount = downloadTasks.filter(t => NETWORK_ACTIVE_STATUSES.includes(t.status)).length;
+    if (activeCount >= maxConcurrentDownloads) return;
 
     const nextTask = downloadTasks.find(t => t.status === 'pending');
     if (!nextTask) return;
@@ -413,9 +508,14 @@
   }
 
   async function startTranscode(task: TranscodeTask) {
-    if (task.status === 'processing') return;
-    task.status = 'processing';
-    console.log("Starting transcoding for task:", task.id, task.inputPath);
+    // Also guards 'waiting': a second click on an already-queued task would invoke
+    // the command twice and encode the same file into the same output path twice.
+    if (task.status === 'waiting' || task.status === 'processing') return;
+    // Queued, not running. The backend holds it until a CPU permit is free — which
+    // may be occupied by a download's re-encode, something the frontend cannot
+    // observe. The first progress event is what promotes it to 'processing'.
+    task.status = 'waiting';
+    console.log("Queuing transcoding for task:", task.id, task.inputPath);
 
     try {
       const dlDir = settingsStore.settings?.download_path || await downloadDir();
@@ -519,8 +619,8 @@
       <div class="px-3 py-2 rounded-xl bg-neutral-200/30 dark:bg-neutral-800/30">
         <p class="text-[10px] uppercase font-bold text-neutral-400 mb-1">並行任務限制</p>
         <div class="flex items-center justify-between text-xs">
-          <span>下載: 2</span>
-          <span>轉檔: 1</span>
+          <span>下載: {maxConcurrentDownloads}</span>
+          <span>編碼: {maxConcurrentEncodes}</span>
         </div>
       </div>
     </div>
@@ -592,8 +692,8 @@
               out:slide
               class="bg-white dark:bg-neutral-900 p-6 rounded-2xl border border-neutral-200 dark:border-neutral-800 shadow-sm flex flex-col gap-4 relative overflow-hidden"
             >
-              {#if task.status === 'fetching' || task.status === 'downloading'}
-                <div class="absolute top-0 left-0 h-1 bg-blue-600 transition-all duration-300" style="width: {task.progress}%"></div>
+              {#if task.status === 'fetching' || PROGRESS_VISIBLE_STATUSES.includes(task.status)}
+                <div class="absolute top-0 left-0 h-1 {task.status === 'waiting-encode' ? 'bg-amber-500' : 'bg-blue-600'} transition-all duration-300" style="width: {task.progress}%"></div>
               {/if}
 
               <div class="flex justify-between items-start">
@@ -602,7 +702,7 @@
                     <span class="px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider {badgeClass(task.source)}">
                       {task.source}
                     </span>
-                    <span class="text-[10px] font-bold text-neutral-400 uppercase">{task.status}</span>
+                    <span class="text-[10px] font-bold uppercase {task.status === 'waiting-encode' ? 'text-amber-600 dark:text-amber-500' : 'text-neutral-400'}">{DOWNLOAD_STATUS_LABEL[task.status]}</span>
                   </div>
                   <h3 class="font-bold truncate text-lg">{task.title}</h3>
                 </div>
@@ -611,19 +711,21 @@
                     <button onclick={() => downloadTasks = downloadTasks.filter(t => t.id !== task.id)} class="text-neutral-400 hover:text-red-500">
                       <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                     </button>
-                  {:else if task.status === 'downloading'}
+                  {:else if PROGRESS_VISIBLE_STATUSES.includes(task.status)}
                     <!-- Two decimals: enough for the post-processing band to visibly
                          move, without the full float spilling across the row. -->
-                    <span class="text-xl font-black text-blue-600">{task.progress.toFixed(2)}%</span>
+                    <span class="text-xl font-black {task.status === 'waiting-encode' ? 'text-amber-600 dark:text-amber-500' : 'text-blue-600'}">{task.progress.toFixed(2)}%</span>
                   {/if}
                 </div>
               </div>
 
-              {#if task.status === 'downloading'}
+              {#if PROGRESS_VISIBLE_STATUSES.includes(task.status)}
                 <div class="flex items-center gap-4">
                   <div class="flex-1 h-2 bg-neutral-100 dark:bg-neutral-800 rounded-full overflow-hidden">
-                    <div class="h-full bg-blue-600 transition-all duration-300" style="width: {task.progress}%"></div>
+                    <div class="h-full {task.status === 'waiting-encode' ? 'bg-amber-500' : 'bg-blue-600'} transition-all duration-300" style="width: {task.progress}%"></div>
                   </div>
+                  <!-- Carries the backend's phase text: which post-processing path
+                       was chosen, or that the task is queued for a CPU permit. -->
                   <span class="text-[10px] font-mono text-neutral-500">{task.speed}</span>
                 </div>
               {/if}
@@ -675,7 +777,10 @@
                     <svg class="w-6 h-6 text-neutral-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                   </div>
                   <div class="flex-1 min-w-0">
-                    <h4 class="font-bold truncate text-base">{task.fileName}</h4>
+                    <div class="flex items-center gap-2">
+                      <h4 class="font-bold truncate text-base">{task.fileName}</h4>
+                      <span class="text-[10px] font-bold uppercase flex-shrink-0 {task.status === 'waiting' ? 'text-amber-600 dark:text-amber-500' : 'text-neutral-400'}">{TRANSCODE_STATUS_LABEL[task.status]}</span>
+                    </div>
                     <p class="text-[10px] text-neutral-400 truncate">{task.inputPath}</p>
                     {#if task.status === 'processing'}
                       <div class="mt-2 flex items-center gap-4">
@@ -684,6 +789,12 @@
                         </div>
                         <span class="text-[10px] font-mono font-bold text-blue-600">{task.progress.toFixed(1)}%</span>
                       </div>
+                    {:else if task.status === 'waiting'}
+                      <!-- Queued behind the shared CPU budget. Without this the card
+                           shows nothing at all and reads as an ignored click. -->
+                      <p class="mt-2 text-[10px] text-amber-600 dark:text-amber-500 font-medium">
+                        等待編碼名額（上限 {maxConcurrentEncodes}，與下載後處理共用）
+                      </p>
                     {/if}
                   </div>
                   <div class="flex-shrink-0 flex items-center gap-3">

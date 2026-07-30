@@ -1,10 +1,13 @@
 use std::process::Stdio;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 use serde::{Serialize, Deserialize};
 use regex::Regex;
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_sql::DbInstances;
+use crate::commands::concurrency::{run_blocking, SharedCpuBudget};
+use crate::commands::settings::cpu_concurrency_or_default;
 use crate::commands::utils::{find_tool_path, hidden_cmd};
 
 #[derive(Serialize, Clone)]
@@ -89,32 +92,17 @@ pub fn build_transcode_args(
     args
 }
 
-#[tauri::command]
-pub async fn transcode_video(
-    app: AppHandle,
-    id: String,
-    input_path: String,
-    output_path: String,
-    options: TranscodeOptions,
-) -> Result<String, String> {
-    println!("--- Transcoding Command Received ---");
-    println!("Input: {}", input_path);
-    println!("Output: {}", output_path);
-
-    let ffmpeg_path = find_tool_path("ffmpeg").ok_or("ffmpeg not found")?;
-    let ffprobe_path = find_tool_path("ffprobe").ok_or("ffprobe not found")?;
-
-    if let Some(parent) = Path::new(&output_path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create output directory: {}", e))?;
-    }
-
-    println!("Step 1: Fetching duration with ffprobe...");
-    let duration_output = hidden_cmd(&ffprobe_path)
+/// Read a file's duration in seconds.
+///
+/// Zero is not a usable duration — every progress value would divide by it — so an
+/// unreadable or absent duration is an error rather than a silent zero.
+fn probe_duration(ffprobe_path: &str, input_path: &str) -> Result<f64, String> {
+    let duration_output = hidden_cmd(ffprobe_path)
         .args(&[
             "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
-            &input_path,
+            input_path,
         ])
         .stdin(Stdio::null())
         .output()
@@ -122,18 +110,27 @@ pub async fn transcode_video(
 
     let total_duration_str = String::from_utf8_lossy(&duration_output.stdout).trim().to_string();
     let total_duration: f64 = total_duration_str.parse().unwrap_or(0.0);
-    println!("Total duration confirmed: {}s", total_duration);
 
     if total_duration == 0.0 {
         return Err("Could not determine video duration".to_string());
     }
+    Ok(total_duration)
+}
 
-    // 2. Construct ffmpeg arguments
-    let args = build_transcode_args(&input_path, &output_path, &options);
-    println!("Step 2: Starting ffmpeg with args: {:?}", args);
-
-    let mut child = hidden_cmd(&ffmpeg_path)
-        .args(&args)
+/// Run ffmpeg and report progress until it exits.
+///
+/// Blocking from start to finish: it reads stderr line by line and waits for the
+/// process. The caller keeps this on a blocking thread and holds a CPU permit for
+/// its whole duration.
+fn run_transcode(
+    app: &AppHandle,
+    id: &str,
+    ffmpeg_path: &str,
+    args: &[String],
+    total_duration: f64,
+) -> Result<(), String> {
+    let mut child = hidden_cmd(ffmpeg_path)
+        .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -141,17 +138,16 @@ pub async fn transcode_video(
 
     let stderr = child.stderr.take().unwrap();
     let reader = BufReader::new(stderr);
-    
+
     // Updated regex to catch both standard output and -progress machine output
     let re_time = Regex::new(r"out_time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
     let re_std = Regex::new(r"time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})").unwrap();
 
-    println!("Step 3: Parsing ffmpeg output for progress...");
     for line in reader.lines() {
         if let Ok(line) = line {
             let mut captured = false;
             let mut time_match = re_time.captures(&line);
-            
+
             if time_match.is_none() {
                 time_match = re_std.captures(&line);
             }
@@ -161,22 +157,22 @@ pub async fn transcode_video(
                 let minutes: f64 = caps[2].parse().unwrap_or(0.0);
                 let seconds: f64 = caps[3].parse().unwrap_or(0.0);
                 let ms: f64 = caps[4].parse().unwrap_or(0.0);
-                
+
                 let current_time = hours * 3600.0 + minutes * 60.0 + seconds + ms / 100.0;
                 let progress = (current_time / total_duration * 100.0).min(99.9);
                 let time_str = format!("{}:{}:{}.{}", &caps[1], &caps[2], &caps[3], &caps[4]);
 
                 let _ = app.emit("transcode-progress", TranscodeProgress {
-                    id: id.clone(),
+                    id: id.to_string(),
                     progress,
                     time: time_str,
                 });
                 captured = true;
             }
-            
+
             if !captured && line.contains("progress=end") {
-                 let _ = app.emit("transcode-progress", TranscodeProgress {
-                    id: id.clone(),
+                let _ = app.emit("transcode-progress", TranscodeProgress {
+                    id: id.to_string(),
                     progress: 100.0,
                     time: "finished".to_string(),
                 });
@@ -187,6 +183,52 @@ pub async fn transcode_video(
     let status = child.wait().map_err(|e| format!("Failed to wait for ffmpeg: {}", e))?;
     if !status.success() {
         return Err("Transcoding failed".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn transcode_video(
+    app: AppHandle,
+    id: String,
+    input_path: String,
+    output_path: String,
+    options: TranscodeOptions,
+    db_instances: State<'_, DbInstances>,
+    cpu_budget: State<'_, SharedCpuBudget>,
+) -> Result<String, String> {
+    let ffmpeg_path = find_tool_path("ffmpeg").ok_or("ffmpeg not found")?;
+    let ffprobe_path = find_tool_path("ffprobe").ok_or("ffprobe not found")?;
+
+    if let Some(parent) = Path::new(&output_path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create output directory: {}", e))?;
+    }
+
+    let total_duration = {
+        let ffprobe_path = ffprobe_path.clone();
+        let input_path = input_path.clone();
+        run_blocking("Duration probe", move || {
+            probe_duration(&ffprobe_path, &input_path)
+        })
+        .await??
+    };
+
+    let args = build_transcode_args(&input_path, &output_path, &options);
+
+    // Every transcode is a re-encode, so it is always billed against the CPU
+    // budget — the same budget the post-download step draws on. Waiting here does
+    // not occupy a runtime worker, so other IPC keeps working while a queue forms.
+    let limit = cpu_concurrency_or_default(&db_instances).await;
+    let _permit = cpu_budget.acquire(limit).await?;
+
+    {
+        let app = app.clone();
+        let id = id.clone();
+        let ffmpeg_path = ffmpeg_path.clone();
+        run_blocking("Transcoding", move || {
+            run_transcode(&app, &id, &ffmpeg_path, &args, total_duration)
+        })
+        .await??;
     }
 
     let _ = app.notification()
