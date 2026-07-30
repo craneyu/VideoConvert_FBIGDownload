@@ -40,6 +40,29 @@ pub fn download_phase_progress(percent: f64) -> f64 {
     (percent / 100.0).clamp(0.0, 1.0) * DOWNLOAD_PHASE_CEILING
 }
 
+/// The ffmpeg audio options for a re-encode.
+///
+/// Copying is not an optimisation here, it is the correct answer: re-encoding audio
+/// that is already AAC costs a second generation of lossy compression *and* makes
+/// the file bigger. Measured on a real Reel, a 59959 bps AAC source came out at
+/// 128385 bps — more bytes for worse audio.
+///
+/// `None` means the probe could not be read at all. That is deliberately treated as
+/// "encode", not "copy": an unknown codec might not be something MP4 can carry.
+/// A probe that succeeded and found no audio stream yields no options, because there
+/// is nothing to encode or copy.
+pub fn audio_args(probe: Option<&ProbeResult>) -> Vec<&'static str> {
+    const ENCODE: [&str; 4] = ["-c:a", "aac", "-b:a", "128k"];
+    let Some(probe) = probe else {
+        return ENCODE.to_vec();
+    };
+    match probe.audio_codec.as_deref() {
+        None => Vec::new(),
+        Some(codec) if codec.eq_ignore_ascii_case("aac") => vec!["-c:a", "copy"],
+        Some(_) => ENCODE.to_vec(),
+    }
+}
+
 /// Is this plan expensive enough to be billed against the shared CPU budget?
 ///
 /// Only re-encoding is. Remuxing copies streams without decoding or encoding, so
@@ -372,6 +395,10 @@ struct DownloadedFile {
     temp_output: std::path::PathBuf,
     final_output_str: String,
     plan: PostProcessPlan,
+    /// What `ffprobe` reported. Carried through because the re-encode path needs the
+    /// audio codec to decide whether the audio can be copied. `None` means the probe
+    /// could not be read.
+    probe: Option<ProbeResult>,
     /// `None` means post-processing cannot report incremental progress.
     duration_secs: Option<f64>,
 }
@@ -514,6 +541,7 @@ fn run_network_phase(
         temp_output,
         final_output_str: final_output.to_string_lossy().to_string(),
         plan,
+        probe,
         duration_secs,
     })
 }
@@ -567,10 +595,7 @@ fn run_post_process(
                 .arg("yuv420p")
                 .arg("-vf")
                 .arg("scale=trunc(iw/2)*2:trunc(ih/2)*2") // Force even dimensions for QuickTime
-                .arg("-c:a")
-                .arg("aac")
-                .arg("-b:a")
-                .arg("128k");
+                .args(audio_args(file.probe.as_ref()));
         }
     }
 
@@ -894,6 +919,39 @@ mod tests {
     fn zero_dimensions_are_re_encoded() {
         let p = probe("h264", Some("aac"), 0, 0);
         assert_eq!(plan_post_processing(Some(&p)), PostProcessPlan::ReEncode);
+    }
+
+    // Audio handling. Re-encoding audio that is already AAC produces a larger file
+    // with worse audio: a real Reel's 59959 bps AAC source became 128385 bps.
+
+    /// The decision table from the video-download-engine spec, verbatim.
+    #[test]
+    fn audio_decision_follows_the_probed_codec() {
+        let cases: [(Option<&str>, Vec<&str>); 4] = [
+            (Some("aac"), vec!["-c:a", "copy"]),
+            (None, vec![]),
+            (Some("opus"), vec!["-c:a", "aac", "-b:a", "128k"]),
+            (Some("mp3"), vec!["-c:a", "aac", "-b:a", "128k"]),
+        ];
+        for (audio, expected) in cases {
+            let p = probe("h264", audio, 1920, 1080);
+            assert_eq!(audio_args(Some(&p)), expected, "audio codec {:?}", audio);
+        }
+    }
+
+    #[test]
+    fn aac_is_matched_case_insensitively() {
+        // ffprobe has been observed reporting codec names in either case.
+        let p = probe("h264", Some("AAC"), 1920, 1080);
+        assert_eq!(audio_args(Some(&p)), vec!["-c:a", "copy"]);
+    }
+
+    #[test]
+    fn unreadable_probe_output_encodes_the_audio() {
+        // The spec table covers a probed file. When the probe itself failed we do
+        // not know what the audio is, so the conservative choice is to encode —
+        // copying an unknown codec could produce a stream MP4 cannot carry.
+        assert_eq!(audio_args(None), vec!["-c:a", "aac", "-b:a", "128k"]);
     }
 
     // Which plans are billed against the shared CPU budget. Remuxing is a stream

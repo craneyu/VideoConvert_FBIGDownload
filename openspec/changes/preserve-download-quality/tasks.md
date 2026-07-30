@@ -1,14 +1,14 @@
 ## 1. 音訊不再二次壓縮（獨立於視訊策略，可先交付）
 
-- [ ] 1.1 讓重新編碼路徑依探測到的音訊 codec 決定音訊處理：已是 AAC 則直接複製、非 AAC 則轉為 AAC、無音訊軌則不產生任何音訊參數。交付 `Audio Is Copied When Already AAC`，並落實 design 決策「音訊在來源已是 AAC 時直接複製」。實作位置為 `src-tauri/src/commands/download.rs` 的後處理參數組裝；判斷所需的音訊 codec 欄位已存在於既有的探測結果結構中。驗證：新增單元測試以 spec 的「audio decision by probed codec」表格四列為輸入（aac→複製、none→無參數、opus→轉碼、mp3→轉碼），斷言產生的 ffmpeg 音訊參數。
+- [x] 1.1 讓重新編碼路徑依探測到的音訊 codec 決定音訊處理：已是 AAC 則直接複製、非 AAC 則轉為 AAC、無音訊軌則不產生任何音訊參數。交付 `Audio Is Copied When Already AAC`，並落實 design 決策「音訊在來源已是 AAC 時直接複製」。實作位置為 `src-tauri/src/commands/download.rs` 的後處理參數組裝；判斷所需的音訊 codec 欄位已存在於既有的探測結果結構中。驗證：新增單元測試以 spec 的「audio decision by probed codec」表格四列為輸入（aac→複製、none→無參數、opus→轉碼、mp3→轉碼），斷言產生的 ffmpeg 音訊參數。
 
 ## 2. 平台編解碼能力偵測
 
-- [ ] 2.1 新增一個模組，對外提供「本平台能否解碼指定視訊 codec」的三態查詢（可以／不行／未知），codec 名稱比較不分大小寫，且不支援的平台走回傳「未知」的預設實作。交付 `Three-State Codec Decode Capability`，並落實 design 決策「平台能力偵測回傳三態，只有明確的「可以」算支援」。實作位置為新檔 `src-tauri/src/commands/codec_support.rs`，並於 `src-tauri/src/commands/mod.rs` 註冊。驗證：新增單元測試斷言同一 codec 以 `AV1`／`av1`／`Av1` 查詢得到相同結果，且預設實作回傳「未知」而非「可以」。
-- [ ] 2.2 讓查詢在單一 process 內只實際詢問平台一次，之後重用結果。交付 `Capability Is Queried Once Per Process`，並落實 design 決策「偵測結果於 process 內只查一次」。驗證：新增單元測試以一個可計數的假平台查詢注入，斷言重複查詢同一 codec 時底層只被呼叫一次。
-- [ ] 2.3 讓平台查詢失敗（框架載入失敗、呼叫回傳錯誤、panic）一律視為「未知」而非「可以」，且不讓下載因此失敗。交付 `Detection Failure Is Treated As Unknown`。驗證：新增單元測試以一個必定失敗的假查詢注入，斷言結果為「未知」且不回傳錯誤給呼叫端。
-- [ ] 2.4 實作 macOS 分支：以 VideoToolbox 的硬體解碼查詢回答，並於 `src-tauri/Cargo.toml` 或建置設定加入該系統框架的連結。交付 design 決策「macOS 用 VideoToolbox 的硬體解碼查詢，並接受它低估軟體解碼」，且該低估行為須寫在程式碼註解裡。驗證：在 macOS 上手動查詢 AV1 並與 `VTIsHardwareDecodeSupported` 的獨立驗證結果一致（本機 M4／macOS 26.6 實測為支援）。
-- [ ] 2.5 [P] 實作 Windows 分支（列舉 Media Foundation 的解碼器）與 Linux 分支（一律回傳「未知」）。交付 design 決策「Windows 列舉 Media Foundation 的解碼器；Linux 一律回「未知」」。Windows 的判斷邏輯須盡量以不依賴平台的純函式表達（例如把「列舉結果 → 三態」的映射獨立出來），因為此專案的 Windows target 無法在 macOS 交叉編譯，只有純函式部分能在本機被測試涵蓋。驗證：純函式部分以單元測試涵蓋（找到解碼器→可以、找不到→不行、列舉失敗→未知）；平台相依部分列入 `docs/windows-verification.md` 的待驗清單。
+- [x] 2.1 新增一個模組，對外提供「本平台能否解碼指定視訊 codec」的三態查詢（可以／不行／未知），codec 名稱比較不分大小寫，且不支援的平台走回傳「未知」的預設實作。交付 `Three-State Codec Decode Capability`，並落實 design 決策「平台能力偵測回傳三態，只有明確的「可以」算支援」。實作位置為新檔 `src-tauri/src/commands/codec_support.rs`，並於 `src-tauri/src/commands/mod.rs` 註冊。驗證：新增單元測試斷言同一 codec 以 `AV1`／`av1`／`Av1` 查詢得到相同結果，且預設實作回傳「未知」而非「可以」。
+- [x] 2.2 讓查詢在單一 process 內只實際詢問平台一次，之後重用結果。交付 `Capability Is Queried Once Per Process`，並落實 design 決策「偵測結果於 process 內只查一次」。驗證：新增單元測試以一個可計數的假平台查詢注入，斷言重複查詢同一 codec 時底層只被呼叫一次。
+- [x] 2.3 讓平台查詢失敗（框架載入失敗、呼叫回傳錯誤、panic）一律視為「未知」而非「可以」，且不讓下載因此失敗。交付 `Detection Failure Is Treated As Unknown`。驗證：新增單元測試以一個必定失敗的假查詢注入，斷言結果為「未知」且不回傳錯誤給呼叫端。
+- [x] 2.4 實作 macOS 分支：以 VideoToolbox 的硬體解碼查詢回答，並於 `src-tauri/Cargo.toml` 或建置設定加入該系統框架的連結。交付 design 決策「macOS 用 VideoToolbox 的硬體解碼查詢，並接受它低估軟體解碼」，且該低估行為須寫在程式碼註解裡。驗證：在 macOS 上手動查詢 AV1 並與 `VTIsHardwareDecodeSupported` 的獨立驗證結果一致（本機 M4／macOS 26.6 實測為支援）。
+- [x] 2.5 [P] 讓除 macOS 以外的平台走同一個回傳「未知」的預設實作，因而一律走重新編碼並維持本變更前的行為。交付 design 決策「Windows 與 Linux 現階段一律回「未知」」。程式碼註解須寫明 Windows 是刻意延後而非遺漏，並指出原因（`MFTEnumEx` 為 COM API 需額外依賴，且此專案的 Windows target 無法在 macOS 編譯 —— 實測會在 `ring` 的 C 編譯階段因找不到 `assert.h` 而失敗）。驗證：新增單元測試斷言預設實作對任何 codec 皆回傳「未知」；並在 macOS 上執行 `cargo test` 確認 macOS 分支與預設分支不會同時生效。
 
 ## 3. 處理策略設定
 

@@ -28,7 +28,7 @@
 ### B. 新增平台編解碼能力偵測（新 capability）
 
 - 新增一個模組回答「本平台能否解碼某個視訊 codec」，回傳三態：**可以**、**不行**、**未知**。
-- macOS 透過 VideoToolbox 的硬體解碼查詢；Windows 透過 Media Foundation 列舉解碼器；Linux 一律回傳未知（無法得知使用者用哪個播放器）。
+- macOS 透過 VideoToolbox 的硬體解碼查詢。Windows 與 Linux 在本變更中一律回傳未知：Linux 沒有能代表使用者播放器能力的系統答案；Windows 的 Media Foundation 查詢是 COM API，需要額外依賴且無法在 macOS 上編譯或測試（此專案的 Windows target 在 macOS 上會於 ring 的 C 編譯階段失敗），因此獨立成另一個能在 Windows 或 CI 上真正驗證的變更。
 - 只有明確回答「可以」才被視為支援。「未知」與「不行」在後續決策中一律走保守路徑。macOS 的查詢只涵蓋硬體解碼，因此具備軟體解碼能力的機器會被低估為不支援 —— 這是刻意選擇的保守方向，且使用者可手動覆寫。
 
 ### C. 新增下載視訊處理策略設定
@@ -44,7 +44,7 @@
 
 ### New Capabilities
 
-- `platform-codec-capability`: 回答「本平台能否解碼指定視訊 codec」的三態偵測 —— macOS 走 VideoToolbox、Windows 走 Media Foundation、Linux 回傳未知；只有明確的「可以」才算支援，其餘一律保守。
+- `platform-codec-capability`: 回答「本平台能否解碼指定視訊 codec」的三態偵測 —— macOS 走 VideoToolbox，其餘平台回傳未知；只有明確的「可以」才算支援，其餘一律保守。
 
 ### Modified Capabilities
 
@@ -58,5 +58,5 @@
   - New: `src-tauri/src/commands/codec_support.rs`
   - Modified: `src-tauri/src/commands/download.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/commands/settings.rs`、`src-tauri/src/lib.rs`、`src/lib/stores/settings.svelte.ts`、`src/routes/settings/+page.svelte`、`src-tauri/Cargo.toml`
   - Removed: (none)
-- Dependencies: macOS 需連結 VideoToolbox 系統框架；Windows 需查詢 Media Foundation。兩者皆為作業系統內建，不引入第三方套件。無資料庫 migration —— 設定沿用既有 key-value 表與 Settings 的合併邏輯。
+- Dependencies: macOS 需連結 VideoToolbox 系統框架（C 函式，以 extern 宣告使用，不引入第三方套件）。Windows 的 Media Foundation 查詢不在本變更範圍內。無資料庫 migration —— 設定沿用既有 key-value 表與 Settings 的合併邏輯。
 - 與 `concurrency-budget` 的互動：放寬後更多任務走 remux，而 remux 依既有規格不佔用 CPU 預算，因此共用編碼名額的競爭會自然下降。該 capability 的規格不需修改。

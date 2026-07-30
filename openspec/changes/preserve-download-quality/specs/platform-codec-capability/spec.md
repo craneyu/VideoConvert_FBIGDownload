@@ -26,8 +26,13 @@ Only the supported answer SHALL be treated as permission to use the original str
 | Platform | Mechanism                          | Possible answers            |
 | -------- | ---------------------------------- | --------------------------- |
 | macOS    | VideoToolbox hardware decode query | supported / unsupported     |
-| Windows  | Media Foundation decoder lookup    | supported / unsupported     |
+| Windows  | none yet — see note                | unknown only                |
 | Linux    | none available                     | unknown only                |
+
+Windows currently has no mechanism: querying Media Foundation is the intended
+approach but requires a COM dependency and cannot be compiled or behaviourally
+tested outside Windows, so it is deferred rather than written blind. Until then
+Windows behaves exactly as a platform that cannot be interrogated.
 
 ### Requirement: Detection Failure Is Treated As Unknown
 
