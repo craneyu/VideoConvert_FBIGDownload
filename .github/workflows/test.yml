@@ -19,10 +19,11 @@ name: "test"
 #
 # Linux is absent because the project's release matrix has no Linux target, and
 # its capability branch answers unknown unconditionally.
+# push is deliberately unfiltered rather than limited to main: a branch gets pushed
+# long before it becomes a pull request, and this is the feedback that has to arrive
+# early. pull_request is kept so the result also lands as a check on the PR page.
 on:
   push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
 
