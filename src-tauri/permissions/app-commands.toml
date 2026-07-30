@@ -13,5 +13,6 @@ allow = [
     "update_setting",
     "check_dependencies",
     "install_dependencies",
-    "read_clipboard_text"
+    "read_clipboard_text",
+    "decodable_video_codecs"
 ]

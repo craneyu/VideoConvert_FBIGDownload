@@ -13,13 +13,13 @@
 ## 3. 處理策略設定
 
 - [x] 3.1 讓 `get_settings` 回報新的處理策略設定：缺鍵時回報 `auto`，值不在 `auto`／`original`／`compat` 之內時保留 `auto` 且不回寫資料庫，並且 `auto` 不得被改寫成偵測結果而必須原樣儲存。交付 `Download Video Handling Setting Key` 與 `Default Settings Values`，並落實 design 決策「處理策略是三值設定，`auto` 於每次下載時解析」。實作位置為 `src-tauri/src/commands/settings.rs` 的 `Settings` 結構、其 `Default` 實作與 `merge` 邏輯。驗證：新增單元測試涵蓋三個合法值各自被接受、一個不合法值落回 `auto`、缺鍵時為 `auto`。
-- [ ] 3.2 讓設定頁可切換三種策略，且在 `auto` 時顯示當下解析到的結果，並說明保留原檔的取捨（畫質更好、檔案更小、幾乎瞬間完成，但可能在其他裝置無法播放）。交付 `Resolved Auto Policy Is Shown`。實作位置為 `src/lib/stores/settings.svelte.ts` 的 `Settings` 介面與 `src/routes/settings/+page.svelte`；需要一個讓前端取得偵測結果的途徑。驗證：手動開啟設定頁，確認三個選項可切換、`auto` 時顯示解析結果、且取捨說明可見；切換到 `compat` 與 `original` 後說明文字隨之變化。
+- [x] 3.2 讓設定頁可切換三種策略，且在 `auto` 時顯示當下解析到的結果，並說明保留原檔的取捨（畫質更好、檔案更小、幾乎瞬間完成，但可能在其他裝置無法播放）。交付 `Resolved Auto Policy Is Shown`。實作位置為 `src/lib/stores/settings.svelte.ts` 的 `Settings` 介面與 `src/routes/settings/+page.svelte`；需要一個讓前端取得偵測結果的途徑。驗證：手動開啟設定頁，確認三個選項可切換、`auto` 時顯示解析結果、且取捨說明可見；切換到 `compat` 與 `original` 後說明文字隨之變化。
 
 ## 4. 後處理決策改由白名單與策略共同決定
 
 - [x] 4.1 把後處理決策改為純函式，同時接受探測結果、處理策略與平台能力答案三個輸入，回傳既有的 remux 或重新編碼計畫；可 remux 的視訊 codec 限定為 H.264 與 AV1，其餘一律重新編碼，音訊與尺寸條件沿用既有規則。交付 `Post-Download Container Optimization`，並落實 design 決策「remux 適用範圍只擴充到 AV1，且沿用既有的音訊與尺寸條件」。平台查詢的結果須由呼叫端傳入而非在函式內查詢，以保持可測試。驗證：新增單元測試涵蓋 video-download-engine spec 的「decision table」全部 12 列。
-- [ ] 4.2 把 4.1 接入下載流程：讀出處理策略設定、取得平台對探測到的視訊 codec 的能力答案，交給決策函式，並讓進度事件的狀態文字反映實際走的分支。讀取設定失敗時退回 `auto` 而非讓下載失敗。驗證：手動在偵測到支援 AV1 的機器上以 `auto` 下載一支 Facebook Reel，確認狀態文字為容器最佳化、輸出的視訊 codec 為 `av1`、檔案大小接近下載到的原檔、後處理耗時遠短於重新編碼。
-- [ ] 4.3 確認 `compat` 策略下的行為與本變更前一致（除音訊那一項）。驗證：手動以 `compat` 下載同一支 Reel，確認輸出視訊 codec 為 `h264`，且以 ffprobe 比對音訊位元率與下載到的原檔相同（證明音訊未被重新編碼）。
+- [x] 4.2 把 4.1 接入下載流程：讀出處理策略設定、取得平台對探測到的視訊 codec 的能力答案，交給決策函式，並讓進度事件的狀態文字反映實際走的分支。讀取設定失敗時退回 `auto` 而非讓下載失敗。驗證：手動在偵測到支援 AV1 的機器上以 `auto` 下載一支 Facebook Reel，確認狀態文字為容器最佳化、輸出的視訊 codec 為 `av1`、檔案大小接近下載到的原檔、後處理耗時遠短於重新編碼。
+- [x] 4.3 確認 `compat` 策略下的行為與本變更前一致（除音訊那一項）。驗證：手動以 `compat` 下載同一支 Reel，確認輸出視訊 codec 為 `h264`，且以 ffprobe 比對音訊位元率與下載到的原檔相同（證明音訊未被重新編碼）。
 
 ## 5. 文件
 
