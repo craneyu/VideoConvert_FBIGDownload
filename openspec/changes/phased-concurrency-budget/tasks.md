@@ -11,7 +11,7 @@
 ## 3. 兩條管線改用許可池
 
 - [ ] 3.1 讓 `download_video` 執行期間不再佔用 async runtime 的 worker：保留其 async 宣告，把逐行讀取子行程輸出與等待其結束的阻塞區段包進 `tauri::async_runtime::spawn_blocking` 並 await 結果，且阻塞區段 panic 時回傳錯誤字串而非中止 runtime。交付 `Long-Running Commands Do Not Block The Async Runtime`，並落實 design 決策「阻塞工作以 spawn_blocking 移出 async runtime」。實作位置為 `src-tauri/src/commands/download.rs`。驗證：手動在一個重新編碼進行中的同時開啟設定頁並修改設定，確認設定頁正常回應。
-- [ ] 3.2 讓下載的後處理階段依既有的 remux 或重新編碼判定結果決定是否取得 CPU 許可：判定為重新編碼才取得許可，判定為 remux 直接執行不排隊。交付 `Remux Is Exempt From The CPU Budget`，並落實 design 決策「容器 remux 不取得 CPU 許可」。驗證：新增單元測試以既有的後處理決策結果為輸入，斷言 remux 不需要許可、重新編碼需要許可。
+- [x] 3.2 讓下載的後處理階段依既有的 remux 或重新編碼判定結果決定是否取得 CPU 許可：判定為重新編碼才取得許可，判定為 remux 直接執行不排隊。交付 `Remux Is Exempt From The CPU Budget`，並落實 design 決策「容器 remux 不取得 CPU 許可」。驗證：新增單元測試以既有的後處理決策結果為輸入，斷言 remux 不需要許可、重新編碼需要許可。
 - [ ] 3.3 讓下載在進入 CPU 許可等待前先發出「等待編碼」狀態，沿用既有的下載進度事件與其狀態文字欄位承載（新增一個狀態文字常數），進度值為下載階段的既有上限值，不新增事件通道。交付 `Phase-Scoped Permit Acquisition`，並落實 design 決策「分階段許可：網路階段結束即釋放，不被 CPU 等待佔用」。驗證：手動以網路 3、CPU 1 排入三支需要重新編碼的影片，確認第一支下載完成時前端收到該狀態文字。
 - [ ] 3.4 [P] 讓 `transcode_video` 同樣不佔用 async runtime 的 worker，並在開始編碼前向同一個 CPU 許可池取得許可。交付 `Transcoding Shares Its Limit With Download Post-Processing`。實作位置為 `src-tauri/src/commands/transcode.rs`。驗證：手動先讓一個下載進入重新編碼階段，再於轉檔頁籤啟動一個任務，確認該轉檔任務顯示為等待而未立刻開始。
 
@@ -25,4 +25,4 @@
 
 ## 5. 文件
 
-- [ ] 5.1 [P] 改寫 `README.md` 中「支援多執行緒下載與影片格式轉換（開發中）」該行，使其描述實際成立的能力：影片格式轉換已提供、多任務並行下載的數量可設定，且不再宣稱尚未實作的單檔多連線加速。驗證：內容審閱，確認該行不含「開發中」字樣，且不宣稱本 change 未交付的能力。
+- [x] 5.1 [P] 改寫 `README.md` 中「支援多執行緒下載與影片格式轉換（開發中）」該行，使其描述實際成立的能力：影片格式轉換已提供、多任務並行下載的數量可設定，且不再宣稱尚未實作的單檔多連線加速。驗證：內容審閱，確認該行不含「開發中」字樣，且不宣稱本 change 未交付的能力。
