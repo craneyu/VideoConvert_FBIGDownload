@@ -1,9 +1,33 @@
 <script lang="ts">
   import { settingsStore, CONCURRENCY_RANGES } from "$lib/stores/settings.svelte";
-  import type { Settings } from "$lib/stores/settings.svelte";
+  import type { Settings, VideoHandling } from "$lib/stores/settings.svelte";
   import type { ThemeMode } from "$lib/theme";
+  import { invoke } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import { fade, fly } from "svelte/transition";
+
+  // Which original video codecs this machine reports it can decode. Needed so the
+  // page can state what 'auto' currently resolves to — otherwise 'auto' tells the
+  // user nothing about whether their downloads are kept or re-encoded.
+  //
+  // Stays `null` while the query is in flight and on failure, so the page never
+  // states a capability it did not confirm.
+  let decodableCodecs = $state<string[] | null>(null);
+  $effect(() => {
+    invoke<string[]>('decodable_video_codecs')
+      .then((codecs) => { decodableCodecs = codecs; })
+      .catch((e) => { console.error('Failed to query decodable codecs:', e); });
+  });
+
+  // AV1 is the codec that decides the outcome in practice: Facebook serves 1080p
+  // Reels as AV1 only, and H.264 sources are remuxed under every policy anyway.
+  const canKeepAv1 = $derived(decodableCodecs === null ? null : decodableCodecs.includes('av1'));
+
+  const VIDEO_HANDLING_OPTIONS: Array<{ value: VideoHandling; label: string }> = [
+    { value: 'auto', label: '自動判斷' },
+    { value: 'original', label: '保留原檔' },
+    { value: 'compat', label: '相容優先' }
+  ];
 
   async function selectDownloadPath() {
     const selected = await open({
@@ -256,6 +280,46 @@
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
               </div>
             </div>
+          </div>
+
+          <!--
+            Video handling belongs with encoding decisions, and this card is the short
+            one in its row — putting it here costs no extra page height, which the
+            note at the top of this file exists to protect.
+          -->
+          <div class="space-y-1.5 mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800/50">
+            <p class="text-xs font-bold text-neutral-500 dark:text-neutral-400 ml-1">下載影片的處理方式</p>
+            <div class="flex gap-1 p-1 bg-neutral-100 dark:bg-neutral-800/60 rounded-xl">
+              {#each VIDEO_HANDLING_OPTIONS as option (option.value)}
+                <button
+                  onclick={() => settingsStore.update('download_video_handling', option.value)}
+                  aria-pressed={settingsStore.settings.download_video_handling === option.value}
+                  class="flex-1 px-1.5 py-1.5 rounded-lg text-[11px] font-bold transition-all {settingsStore.settings.download_video_handling === option.value
+                    ? 'bg-white dark:bg-neutral-700 text-blue-600 dark:text-blue-400 shadow-sm'
+                    : 'text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300'}"
+                >
+                  {option.label}
+                </button>
+              {/each}
+            </div>
+            <p class="text-[10px] text-neutral-500 dark:text-neutral-400 leading-snug ml-1">
+              {#if settingsStore.settings.download_video_handling === 'auto'}
+                {#if canKeepAv1 === null}
+                  正在偵測本機的解碼能力…
+                {:else if canKeepAv1}
+                  <span class="font-bold text-emerald-600 dark:text-emerald-500">本機可解碼 AV1 → 保留原始畫質</span>（免重編、檔案更小、幾乎瞬間完成）
+                {:else}
+                  <span class="font-bold">未能確認本機可解碼 AV1 → 重新編碼為 H.264</span>
+                {/if}
+              {:else if settingsStore.settings.download_video_handling === 'original'}
+                一律保留原始視訊串流，不重新編碼。
+              {:else}
+                一律重新編碼為 H.264，維持最大相容性。
+              {/if}
+            </p>
+            <p class="text-[10px] text-amber-600 dark:text-amber-500 leading-snug ml-1">
+              保留原檔畫質更好、檔案更小，但<span class="font-bold">可能在不支援該編碼的裝置上無法播放</span> —— 偵測只反映這台機器。
+            </p>
           </div>
 
         </section>

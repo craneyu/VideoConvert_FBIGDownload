@@ -236,6 +236,7 @@ pub fn run() {
             commands::download::download_video,
             commands::download::open_folder,
             commands::transcode::transcode_video,
+            commands::codec_support::decodable_video_codecs,
             commands::settings::get_settings,
             commands::settings::update_setting,
             commands::utils::check_dependencies,

@@ -115,6 +115,27 @@ pub fn video_decode_support(codec: &str) -> DecodeSupport {
     memoised(codec, || platform_support(codec))
 }
 
+/// The video codecs the download pipeline is able to remux into MP4.
+///
+/// Deliberately closed: a codec absent from this list is re-encoded whatever the
+/// policy says, because its playability inside an MP4 container is not predictable.
+/// VP9 is the notable omission — legal in MP4, poorly supported in practice.
+pub const REMUXABLE_VIDEO_CODECS: [&str; 2] = ["h264", "av1"];
+
+/// Which remuxable codecs this machine reports it can decode.
+///
+/// Exposed to the frontend so the settings page can say what `auto` currently
+/// resolves to. Without it `auto` gives the user no way to tell whether their
+/// downloads are being kept or re-encoded.
+#[tauri::command]
+pub fn decodable_video_codecs() -> Vec<String> {
+    REMUXABLE_VIDEO_CODECS
+        .iter()
+        .filter(|codec| video_decode_support(codec).is_supported())
+        .map(|codec| codec.to_string())
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{video_codec_fourcc, DecodeSupport};

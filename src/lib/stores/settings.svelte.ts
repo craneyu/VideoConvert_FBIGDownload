@@ -16,7 +16,13 @@ export interface Settings {
     // pipelines. The permit pool is built at startup, so a change applies on the
     // next launch.
     max_cpu_concurrency: number;
+    // Whether a downloaded video keeps its original stream or is re-encoded for
+    // compatibility. 'auto' is resolved per download from the platform's decode
+    // capability and is stored as 'auto', never as the resolved answer.
+    download_video_handling: VideoHandling;
 }
+
+export type VideoHandling = 'auto' | 'original' | 'compat';
 
 // Mirrors the ranges the backend accepts when merging stored settings. The
 // backend is authoritative — it falls back to the default for anything outside
