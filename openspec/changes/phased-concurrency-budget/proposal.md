@@ -55,4 +55,4 @@ VidBridge 的 README 宣稱「支援多執行緒下載與影片格式轉換（�
   - New: `src-tauri/src/commands/concurrency.rs`
   - Modified: `src-tauri/src/commands/download.rs`、`src-tauri/src/commands/transcode.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/commands/settings.rs`、`src-tauri/src/lib.rs`、`src/routes/+page.svelte`、`src/routes/settings/+page.svelte`、`src/lib/stores/settings.svelte.ts`、`README.md`
   - Removed: (none)
-- Dependencies: 無新增外部依賴。設定以既有的 key-value 表儲存並經由 Settings 的合併邏輯讀出，因此不需要新的資料庫 migration。
+- Dependencies: 不引入任何新的第三方套件。`tokio` 會由既有的傳遞依賴提升為直接依賴（只啟用 `sync` feature），因為許可池需要 `Semaphore` 的 async 取得語意，而 Tauri 只 re-export 了 `Mutex`、`RwLock` 與 `channel`。tokio 本來就已編進二進位檔，此改動不增加任何下載或建置體積。設定以既有的 key-value 表儲存並經由 Settings 的合併邏輯讀出，因此不需要新的資料庫 migration。

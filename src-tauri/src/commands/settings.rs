@@ -11,6 +11,41 @@ use sqlx::Row;
 /// "light" or "dark".
 const VALID_THEMES: [&str; 3] = ["system", "light", "dark"];
 
+/// How many downloads run their network phase at once.
+///
+/// Three rather than the previous two: the network phase is cheap to parallelise,
+/// unlike the encode phase it feeds.
+pub const DEFAULT_NETWORK_CONCURRENCY: u32 = 3;
+/// How many re-encodes run at once, across both the download and transcoding
+/// pipelines.
+///
+/// One, and deliberately not derived from the core count: libx264 already scales
+/// across every available core, so a second concurrent encode halves each one
+/// rather than adding throughput.
+pub const DEFAULT_CPU_CONCURRENCY: u32 = 1;
+
+/// Accepted range for [`Settings::max_network_concurrency`].
+const NETWORK_CONCURRENCY_RANGE: std::ops::RangeInclusive<u32> = 1..=8;
+/// Accepted range for [`Settings::max_cpu_concurrency`].
+///
+/// Capped at two, and the second slot exists to keep the app responsive rather
+/// than to go faster — see [`DEFAULT_CPU_CONCURRENCY`].
+const CPU_CONCURRENCY_RANGE: std::ops::RangeInclusive<u32> = 1..=2;
+
+/// Read a stored concurrency limit.
+///
+/// `None` means the stored value is unusable — not a number, or outside `range` —
+/// and the caller keeps its default. Zero is outside every range on purpose: a
+/// limit of zero would stop every download and every encode without reporting
+/// anything, which is far worse than ignoring a bad value.
+fn parse_concurrency(value: &str, range: &std::ops::RangeInclusive<u32>) -> Option<u32> {
+    value
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|limit| range.contains(limit))
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub download_path: String,
@@ -18,6 +53,8 @@ pub struct Settings {
     pub transcoding_preset: String,
     pub detect_clipboard: bool,
     pub theme: String,
+    pub max_network_concurrency: u32,
+    pub max_cpu_concurrency: u32,
 }
 
 impl Default for Settings {
@@ -32,6 +69,8 @@ impl Default for Settings {
             transcoding_preset: "Balanced".to_string(),
             detect_clipboard: true,
             theme: "system".to_string(),
+            max_network_concurrency: DEFAULT_NETWORK_CONCURRENCY,
+            max_cpu_concurrency: DEFAULT_CPU_CONCURRENCY,
         }
     }
 }
@@ -60,6 +99,20 @@ impl Settings {
                         self.theme = value;
                     }
                 }
+                // Same contract as `theme`: an unusable value leaves the default
+                // standing for this run and is not corrected in the database.
+                // Each limit is checked against its own range, so a value that is
+                // valid for one is not thereby accepted for the other.
+                "max_network_concurrency" => {
+                    if let Some(limit) = parse_concurrency(&value, &NETWORK_CONCURRENCY_RANGE) {
+                        self.max_network_concurrency = limit;
+                    }
+                }
+                "max_cpu_concurrency" => {
+                    if let Some(limit) = parse_concurrency(&value, &CPU_CONCURRENCY_RANGE) {
+                        self.max_cpu_concurrency = limit;
+                    }
+                }
                 _ => {}
             }
         }
@@ -67,10 +120,11 @@ impl Settings {
     }
 }
 
-#[tauri::command]
-pub async fn get_settings(
-    db_instances: State<'_, DbInstances>,
-) -> Result<Settings, String> {
+/// Read the effective settings.
+///
+/// Extracted from `get_settings` so other commands can read a setting without
+/// going through the IPC layer — the CPU budget's capacity comes from here.
+pub async fn load_settings(db_instances: &DbInstances) -> Result<Settings, String> {
     let instances = db_instances.0.read().await;
     let db = instances
         .get("sqlite:vidbridge.db")
@@ -90,6 +144,26 @@ pub async fn get_settings(
     }
 
     Ok(Settings::default().merge(db_values))
+}
+
+/// The configured CPU concurrency, or the default when the settings cannot be
+/// read.
+///
+/// A download or transcode must not fail because the database is not loaded yet;
+/// falling back to the default limit is the conservative outcome — it is the
+/// smaller value, so it never widens the budget by accident.
+pub async fn cpu_concurrency_or_default(db_instances: &DbInstances) -> u32 {
+    load_settings(db_instances)
+        .await
+        .map(|settings| settings.max_cpu_concurrency)
+        .unwrap_or(DEFAULT_CPU_CONCURRENCY)
+}
+
+#[tauri::command]
+pub async fn get_settings(
+    db_instances: State<'_, DbInstances>,
+) -> Result<Settings, String> {
+    load_settings(&db_instances).await
 }
 
 #[tauri::command]
@@ -166,6 +240,89 @@ mod tests {
                 Settings::default().merge(vec![("theme".to_string(), value.to_string())]);
             assert_eq!(merged.theme, value, "theme {:?} must be accepted", value);
         }
+    }
+
+    // Concurrency limits. Both are numeric, so unlike `theme` they cannot be
+    // validated with an allowlist; each has its own accepted range instead.
+
+    #[test]
+    fn concurrency_defaults_are_three_network_and_one_cpu() {
+        let settings = Settings::default();
+        assert_eq!(settings.max_network_concurrency, 3);
+        // One, not a value derived from the core count: libx264 already scales
+        // across every core, so a second concurrent encode halves each rather
+        // than adding throughput.
+        assert_eq!(settings.max_cpu_concurrency, 1);
+    }
+
+    /// The decision table from the settings-management spec, verbatim.
+    ///
+    /// Each row is (key, stored value, expected reported value).
+    const STORED_CONCURRENCY_VALUES: [(&str, &str, u32); 8] = [
+        ("max_network_concurrency", "4", 4),
+        ("max_network_concurrency", "1", 1),
+        ("max_network_concurrency", "8", 8),
+        ("max_network_concurrency", "0", 3),
+        ("max_network_concurrency", "9", 3),
+        ("max_network_concurrency", "abc", 3),
+        ("max_cpu_concurrency", "2", 2),
+        ("max_cpu_concurrency", "3", 1),
+    ];
+
+    #[test]
+    fn stored_concurrency_values_are_parsed_and_range_checked() {
+        for (key, stored, expected) in STORED_CONCURRENCY_VALUES {
+            let merged =
+                Settings::default().merge(vec![(key.to_string(), stored.to_string())]);
+            let actual = match key {
+                "max_network_concurrency" => merged.max_network_concurrency,
+                "max_cpu_concurrency" => merged.max_cpu_concurrency,
+                other => panic!("unexpected key in the table: {}", other),
+            };
+            assert_eq!(
+                actual, expected,
+                "{} stored as {:?} must be reported as {}",
+                key, stored, expected
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_cpu_concurrency_falls_back_to_the_default() {
+        // The scenario stated in the spec: 8 is a plausible value for the network
+        // limit but outside the CPU limit's range, so it must not be accepted for
+        // the CPU limit just because it parses as a number.
+        let merged = Settings::default()
+            .merge(vec![("max_cpu_concurrency".to_string(), "8".to_string())]);
+        assert_eq!(merged.max_cpu_concurrency, 1);
+    }
+
+    #[test]
+    fn zero_concurrency_never_reaches_the_caller() {
+        // A limit of zero would mean no download ever starts and nothing is ever
+        // encoded — a silent deadlock rather than a visible error. Both ranges
+        // start at 1 so a hand-edited or truncated value cannot produce it.
+        for key in ["max_network_concurrency", "max_cpu_concurrency"] {
+            let merged = Settings::default().merge(vec![(key.to_string(), "0".to_string())]);
+            assert!(
+                merged.max_network_concurrency >= 1 && merged.max_cpu_concurrency >= 1,
+                "{} stored as 0 must not yield a zero limit",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_concurrency_value_leaves_the_other_limit_alone() {
+        // The two limits are both unsigned integers, so a merge that mixed them
+        // up would be invisible to the type system. Rejecting one must not change
+        // the other.
+        let merged = Settings::default().merge(vec![
+            ("max_network_concurrency".to_string(), "9".to_string()),
+            ("max_cpu_concurrency".to_string(), "2".to_string()),
+        ]);
+        assert_eq!(merged.max_network_concurrency, 3, "rejected, so default");
+        assert_eq!(merged.max_cpu_concurrency, 2, "accepted independently");
     }
 
     #[test]

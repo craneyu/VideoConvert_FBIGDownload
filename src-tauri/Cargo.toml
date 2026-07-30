@@ -30,4 +30,14 @@ dirs = "6.0.0"
 sqlx = { version = "0.8.6", features = ["sqlite", "runtime-tokio"] }
 tauri-plugin-clipboard-manager = "2.2.1"
 uuid = { version = "1.23.1", features = ["v4"] }
+# Promoted from a transitive dependency (tauri, sqlx) to a direct one for
+# Semaphore, which the CPU budget needs and which Tauri does not re-export — it
+# re-exports only Mutex, RwLock and channel. Already compiled into the binary, so
+# this adds no download or build weight.
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+# Only the tests need to drive time: proving that a second permit stays pending
+# while the first is held requires a timeout rather than a sleep race.
+tokio = { version = "1", features = ["macros", "time"] }
 

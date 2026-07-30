@@ -1,12 +1,12 @@
 ## 1. 設定項與預設值
 
-- [ ] 1.1 讓 `get_settings` 回報兩個新的並行度設定：缺鍵時回報預設值（網路 3、CPU 1），非數字或超出範圍（網路 1-8、CPU 1-2）時保留預設值且不回寫資料庫。交付 `Concurrency Setting Keys` 與 `Default Settings Values`，並落實 design 決策「預設網路 3、CPU 1，CPU 上限 2」。實作位置為 `src-tauri/src/commands/settings.rs` 的 `Settings` 結構、其 `Default` 實作與 `merge` 邏輯。驗證：新增單元測試涵蓋 settings-management spec 中「Parsing stored concurrency values」表格的全部八列輸入與其預期回報值。
+- [x] 1.1 讓 `get_settings` 回報兩個新的並行度設定：缺鍵時回報預設值（網路 3、CPU 1），非數字或超出範圍（網路 1-8、CPU 1-2）時保留預設值且不回寫資料庫。交付 `Concurrency Setting Keys` 與 `Default Settings Values`，並落實 design 決策「預設網路 3、CPU 1，CPU 上限 2」。實作位置為 `src-tauri/src/commands/settings.rs` 的 `Settings` 結構、其 `Default` 實作與 `merge` 邏輯。驗證：新增單元測試涵蓋 settings-management spec 中「Parsing stored concurrency values」表格的全部八列輸入與其預期回報值。
 - [ ] 1.2 讓設定頁可調整兩個並行度，且 CPU 欄位明確標示變更於下次啟動生效、網路欄位立即生效，CPU 上限的說明文字寫明第二個名額的用途是「讓程式保持回應」而非「更快」。交付 `CPU Concurrency Change Requires A Restart`。實作位置為 `src/lib/stores/settings.svelte.ts` 的 `Settings` 介面與 `src/routes/settings/+page.svelte`。驗證：手動開啟設定頁，確認兩個欄位可調整、輸入值受各自範圍限制、且重新啟動提示與 CPU 說明文字皆可見。
 
 ## 2. CPU 許可池
 
-- [ ] 2.1 新增一個持有 CPU 許可池的模組並註冊為 Tauri 受管理狀態，池容量於程式啟動時取自 CPU 並行度設定，對外提供非阻塞式（async）的取得許可操作並回傳釋放時歸還許可的守衛值。交付 `Shared CPU Permit Pool`，並落實 design 決策「CPU 許可池由下載後處理與轉檔共用」。實作位置為新檔 `src-tauri/src/commands/concurrency.rs`，並於 `src-tauri/src/commands/mod.rs` 與 `src-tauri/src/lib.rs` 註冊。驗證：新增單元測試斷言上限為 1 時第二次取得許可會等待，且前一個守衛釋放後該次取得才成功。
-- [ ] 2.2 讓取得許可失敗回傳錯誤，而不是在沒有許可的情況下開始編碼。交付 `Permit Acquisition Failure Is Surfaced`。驗證：新增單元測試對一個已關閉的許可池請求許可，斷言回傳錯誤且未執行編碼路徑。
+- [x] 2.1 新增一個持有 CPU 許可池的模組並註冊為 Tauri 受管理狀態，池容量在第一次需要許可時取自 CPU 並行度設定、之後於整個 process 固定（不能在 setup 階段讀，資料庫連線與 migrations 都要等前端載入才建立），對外提供非阻塞式（async）的取得許可操作並回傳釋放時歸還許可的守衛值。交付 `Shared CPU Permit Pool`，並落實 design 決策「CPU 許可池由下載後處理與轉檔共用」。實作位置為新檔 `src-tauri/src/commands/concurrency.rs`，並於 `src-tauri/src/commands/mod.rs` 與 `src-tauri/src/lib.rs` 註冊。驗證：新增單元測試斷言上限為 1 時第二次取得許可會等待，且前一個守衛釋放後該次取得才成功。
+- [x] 2.2 讓取得許可失敗回傳錯誤，而不是在沒有許可的情況下開始編碼。交付 `Permit Acquisition Failure Is Surfaced`。驗證：新增單元測試對一個已關閉的許可池請求許可，斷言回傳錯誤且未執行編碼路徑。
 
 ## 3. 兩條管線改用許可池
 

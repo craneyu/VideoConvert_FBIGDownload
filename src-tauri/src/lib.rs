@@ -176,6 +176,11 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
+        // The budget both re-encoding pipelines draw on. Registered here so the
+        // download and transcoding commands reach the same instance; its capacity
+        // is read from settings the first time a permit is needed, not now — see
+        // SharedCpuBudget for why that cannot happen during setup.
+        .manage(commands::concurrency::SharedCpuBudget::default())
         .setup(|app| {
             // Labels are shown to the user, so they follow the rest of the UI and
             // the wording in the spec. The ids must stay stable — `tray_action`

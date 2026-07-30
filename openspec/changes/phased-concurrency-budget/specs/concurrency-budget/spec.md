@@ -2,7 +2,9 @@
 
 ### Requirement: Shared CPU Permit Pool
 
-The system SHALL bound the number of concurrently running re-encode operations with a single permit pool that is shared by both the download post-processing pipeline and the transcoding pipeline. The number of permits SHALL come from the CPU concurrency setting, read once when the application starts.
+The system SHALL bound the number of concurrently running re-encode operations with a single permit pool that is shared by both the download post-processing pipeline and the transcoding pipeline. The number of permits SHALL come from the CPU concurrency setting, read once when a permit is first needed and fixed for the remaining lifetime of the process.
+
+The pool SHALL NOT be built before the setting can be read. The database connection is established when the frontend loads it, so reading the setting during application setup would yield the default on every launch and silently discard a configured value.
 
 Neither pipeline SHALL maintain its own independent re-encode limit, because a per-pipeline limit cannot observe work running in the other pipeline.
 

@@ -64,7 +64,7 @@ The generic `update_setting` command SHALL remain free of per-key validation. Pa
 
 ### Requirement: CPU Concurrency Change Requires A Restart
 
-The CPU permit pool is created when the application starts, so a change to `max_cpu_concurrency` SHALL take effect on the next launch. The settings interface SHALL state this, so that a user who changes the value does not read the unchanged behaviour as the setting having failed to save.
+The CPU permit pool is built once per process — when a permit is first needed — and is fixed thereafter, so a change to `max_cpu_concurrency` SHALL take effect on the next launch. The settings interface SHALL state this, so that a user who changes the value does not read the unchanged behaviour as the setting having failed to save.
 
 A change to `max_network_concurrency` SHALL take effect immediately, because the download queue reads that setting each time it decides whether to start another download.
 

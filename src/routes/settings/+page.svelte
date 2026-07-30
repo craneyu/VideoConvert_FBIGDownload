@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { settingsStore } from "$lib/stores/settings.svelte";
+  import { settingsStore, CONCURRENCY_RANGES } from "$lib/stores/settings.svelte";
+  import type { Settings } from "$lib/stores/settings.svelte";
   import type { ThemeMode } from "$lib/theme";
   import { open } from "@tauri-apps/plugin-dialog";
   import { fade, fly } from "svelte/transition";
@@ -28,6 +29,27 @@
   function handlePresetChange(e: Event) {
     const target = e.target as HTMLSelectElement;
     settingsStore.update('transcoding_preset', target.value);
+  }
+
+  type ConcurrencyKey = keyof typeof CONCURRENCY_RANGES;
+
+  /// Write a concurrency limit only when the field holds a usable value.
+  ///
+  /// An empty or out-of-range field is reverted to the stored value rather than
+  /// sent. The backend would accept the write and then fall back to its default
+  /// when reading, which the user reads as the setting having failed to save.
+  function handleConcurrencyChange(key: ConcurrencyKey) {
+    return (e: Event) => {
+      const target = e.target as HTMLInputElement;
+      const { min, max } = CONCURRENCY_RANGES[key];
+      const parsed = Number.parseInt(target.value, 10);
+
+      if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+        target.value = String(settingsStore.settings?.[key] ?? min);
+        return;
+      }
+      settingsStore.update(key as keyof Settings, parsed);
+    };
   }
 
   // "跟隨系統" is first because it is the default, and the only option whose
@@ -87,6 +109,24 @@
                 >
                   瀏覽
                 </button>
+              </div>
+            </div>
+
+            <div class="space-y-1.5">
+              <label for="network-concurrency" class="text-xs font-bold text-neutral-500 dark:text-neutral-400 ml-1">同時下載數量</label>
+              <div class="flex items-center gap-3">
+                <input
+                  id="network-concurrency"
+                  type="number"
+                  min={CONCURRENCY_RANGES.max_network_concurrency.min}
+                  max={CONCURRENCY_RANGES.max_network_concurrency.max}
+                  value={settingsStore.settings.max_network_concurrency}
+                  onchange={handleConcurrencyChange('max_network_concurrency')}
+                  class="w-20 bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+                />
+                <p class="text-xs text-neutral-500 dark:text-neutral-400 leading-snug flex-1">
+                  可設 {CONCURRENCY_RANGES.max_network_concurrency.min}–{CONCURRENCY_RANGES.max_network_concurrency.max}，<span class="font-bold">立即生效</span>。只計算正在下載的任務；已下載完成、等待編碼的任務不佔用名額。
+                </p>
               </div>
             </div>
 
@@ -174,6 +214,32 @@
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
               </div>
             </div>
+          </div>
+
+          <!--
+            The CPU limit lives here rather than under downloads because it governs
+            re-encoding, which both the transcoding tab and the post-download step
+            perform. They draw on the same budget.
+          -->
+          <div class="space-y-1.5 mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800/50">
+            <label for="cpu-concurrency" class="text-xs font-bold text-neutral-500 dark:text-neutral-400 ml-1">同時編碼數量</label>
+            <div class="flex items-center gap-3">
+              <input
+                id="cpu-concurrency"
+                type="number"
+                min={CONCURRENCY_RANGES.max_cpu_concurrency.min}
+                max={CONCURRENCY_RANGES.max_cpu_concurrency.max}
+                value={settingsStore.settings.max_cpu_concurrency}
+                onchange={handleConcurrencyChange('max_cpu_concurrency')}
+                class="w-20 bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+              />
+              <p class="text-xs text-neutral-500 dark:text-neutral-400 leading-snug flex-1">
+                下載後處理與轉檔<span class="font-bold">共用</span>此上限，可設 {CONCURRENCY_RANGES.max_cpu_concurrency.min}–{CONCURRENCY_RANGES.max_cpu_concurrency.max}。
+              </p>
+            </div>
+            <p class="text-[11px] text-neutral-500 dark:text-neutral-400 leading-snug ml-1">
+              設為 2 是為了<span class="font-bold">讓程式保持回應</span>，不會更快 —— 編碼本來就吃滿所有核心，並行兩個是把彼此速度砍半而非加總。<span class="font-bold text-amber-600 dark:text-amber-500">變更於下次啟動生效。</span>
+            </p>
           </div>
         </section>
 
