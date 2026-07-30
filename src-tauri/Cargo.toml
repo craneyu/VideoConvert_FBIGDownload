@@ -1,6 +1,6 @@
 [package]
 name = "vidbridge"
-version = "0.1.5"
+version = "0.1.6"
 description = "VidBridge Video Toolkit"
 authors = ["craneyu"]
 edition = "2021"
