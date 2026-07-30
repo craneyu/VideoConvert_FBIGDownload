@@ -13,7 +13,7 @@
 | 項目 | 說明 |
 | --- | --- |
 | Rust | `rustup default stable-x86_64-pc-windows-msvc` |
-| C++ 建置工具 | Visual Studio Build Tools，需含 **Desktop development with C++**（`ring` 等依賴需要 C 編譯器） |
+| C++ 建置工具 | Visual Studio Build Tools，需含 **Desktop development with C++**（`ring` 等依賴需要 C 編譯器）。裝了不等於能建置 —— 見 A 節開頭的 vcvars 說明 |
 | WebView2 | Windows 11 內建；Windows 10 需自行安裝 Evergreen Runtime |
 | Node.js | LTS |
 | 外部工具 | `ffmpeg`、`ffprobe`、`yt-dlp`（App 會自行偵測並可代為安裝，見 E 組） |
@@ -27,6 +27,42 @@ npm install
 ---
 
 ## A. 先確認能編譯（最高優先，且最省時間）
+
+### A-0. 先初始化 MSVC 環境，否則建置失敗與程式碼無關
+
+**在裸 PowerShell 直接跑 `cargo` 可能失敗，而且錯誤看起來像程式問題。** 已在 Windows 11 實測遇到：
+
+```
+cc-rs: windows.h(171): fatal error C1083: Cannot open include file: 'excpt.h'
+LINK : fatal error LNK1104: cannot open file 'msvcrt.lib'
+```
+
+兩者都是 `INCLUDE` / `LIB` 沒設定的症狀（cargo 的 build script 輸出會顯示 `INCLUDE = None`），不是 Windows 專屬區塊有錯。
+
+**成因**：機器上裝了多份 Visual Studio 時，rustc 可能挑到其中一份的 `cl.exe`，卻沒有對應的 Windows SDK 路徑。實測機上有 Enterprise 2026、Enterprise 2022、Build Tools 2022 三份，而兩份 **Enterprise 的 `VC\Auxiliary\Build` 只有 `vcvars64.bat` 卻缺 `vcvarsall.bat`** —— `vcvars64.bat` 內部要呼叫 `vcvarsall.bat`，所以連它自己都跑不起來：
+
+```
+'"...\VC\Auxiliary\Build\vcvarsall.bat"' is not recognized as an internal or external command
+```
+
+只有 Build Tools 2022 帶完整的 vcvars 腳本組。
+
+**做法**：把建置指令包在 Build Tools 的 `vcvars64.bat` 裡，不要假設裸環境可用。
+
+```powershell
+cmd /c '"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1 && cargo test --lib'
+```
+
+先確認哪些 VS 有完整腳本（挑有 `vcvarsall.bat` 的那份）：
+
+```powershell
+& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -property installationPath
+Get-ChildItem "<上面某個路徑>\VC\Auxiliary\Build" -Filter "vcvars*"
+```
+
+或改用「x64 Native Tools Command Prompt for VS」開一個已初始化的終端機再跑後續指令。**建置一失敗就先確認這件事**，再去懷疑程式碼。
+
+### A-1. 編譯與單元測試
 
 **先跑 `cargo check` 再跑完整建置。** Windows 專屬區塊若有型別錯誤，`cargo check` 幾十秒就會報出來，不必等完整建置。
 
