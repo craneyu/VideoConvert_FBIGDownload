@@ -65,6 +65,31 @@ impl CpuBudget {
     }
 }
 
+/// Run blocking work off the async runtime.
+///
+/// Every long step below reads a child process's output line by line and waits for
+/// it to exit. Doing that directly in an `async` command occupies a runtime worker
+/// for the whole download, so unrelated IPC — reading settings, querying history —
+/// stalls behind it.
+///
+/// Dropping the `async` keyword does not fix this. A command without it runs
+/// synchronously on the IPC thread, which is worse; and marking a synchronous
+/// function `#[tauri::command(async)]` still hands the call to
+/// `async_runtime::spawn`, despite the "sync_threadpool" label the macro records.
+/// Only an explicit `spawn_blocking` leaves the worker pool.
+///
+/// A panic inside `work` becomes an error string rather than taking the runtime
+/// down with it.
+pub async fn run_blocking<F, R>(phase: &str, work: F) -> Result<R, String>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("{} terminated unexpectedly: {}", phase, e))
+}
+
 /// The application-wide handle to the CPU budget, held in Tauri's managed state.
 ///
 /// The pool is built the first time a permit is needed rather than at startup: the
