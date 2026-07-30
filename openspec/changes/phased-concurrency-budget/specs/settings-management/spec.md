@@ -76,4 +76,4 @@ A change to `max_network_concurrency` SHALL take effect immediately, because the
 #### Scenario: Changing the network limit applies at once
 
 - **WHEN** the user changes the network concurrency setting
-- **THEN** the download queue SHALL use the new value for its next decision, without the application being restarted
+- **THEN** the new value SHALL take effect without the application being restarted, and without waiting for another task to be added or to finish
