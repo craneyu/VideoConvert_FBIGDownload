@@ -59,6 +59,10 @@ jobs:
       - name: run Rust unit tests (windows only)
         if: matrix.platform == 'windows-latest'
         working-directory: src-tauri
+        env:
+          # Declares the answer this environment must give for AV1 — see the same
+          # variable in test.yml for why a runner is the "no decoder" half.
+          VIDBRIDGE_EXPECT_AV1_DECODE: unsupported
         run: cargo test --lib
 
       - uses: tauri-apps/tauri-action@v0

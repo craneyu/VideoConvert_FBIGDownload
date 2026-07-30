@@ -16,8 +16,8 @@
 
 ## 4. 兩種實機環境驗證
 
-- [ ] 4.1 在有 AV1 解碼能力的 Windows 上驗證正向路徑：設定頁「自動判斷」的說明文字從「未能確認本機可解碼 AV1 → 重新編碼為 H.264」變為「本機可解碼 AV1 → 保留原始畫質」，且下載一支 AV1 來源的 Facebook Reel 後，後處理狀態文字為容器最佳化、輸出視訊編碼為 av1、檔案大小接近原檔。驗證：目視設定頁文字，並以 ffprobe 確認輸出編碼與大小。
-- [ ] 4.2 依「負向路徑交給 CI runner 驗證，不改動開發機的解碼器安裝」驗證無解碼能力環境的行為：新增在 push 與 pull request 時觸發的 CI workflow，在 windows-latest 上跑單元測試，使 `windows_answers_definitively_for_a_mapped_codec` 在一台沒有 AV1 擴充的機器上執行 —— 該環境下 av1 必須回 unsupported（而非 unknown），這正是負向路徑。驗證：該 workflow 在本 PR 的 CI 執行成功，且 log 顯示的測試數與本機一致。
+- [x] 4.1 在有 AV1 解碼能力的 Windows 上驗證正向路徑：設定頁「自動判斷」的說明文字從「未能確認本機可解碼 AV1 → 重新編碼為 H.264」變為「本機可解碼 AV1 → 保留原始畫質」，且下載一支 AV1 來源的 Facebook Reel 後，後處理狀態文字為容器最佳化、輸出視訊編碼為 av1、檔案大小接近原檔。驗證：目視設定頁文字，並以 ffprobe 確認輸出編碼與大小。
+- [x] 4.2 依「負向路徑交給 CI runner 驗證，不改動開發機的解碼器安裝」讓無解碼能力環境的答案成為**可斷言**的事實，而不只是綠燈下的假設：`windows_answers_definitively_for_a_mapped_codec` 只能斷言「不是 unknown」，無法區分 runner 究竟回 unsupported 還是 supported。新增一個從環境變數 `VIDBRIDGE_EXPECT_AV1_DECODE` 讀取期望答案的測試，CI 的 Windows job 宣告 `unsupported`；未設或空字串則不斷言，值不合法則明確報錯。驗證：本機以 supported 通過、以 unsupported 失敗（證明有鑑別力），且 CI 的 windows-latest job 在宣告 unsupported 的情況下通過 —— 綠燈即代表 runner 確實回 unsupported。
 - [x] 4.3 [P] 讓 Windows 的單元測試在 CI 上持續被執行：在 .github/workflows/release.yml 的 windows-latest 工作加入 cargo test --lib，並確認該 runner 屬於無 AV1 解碼能力環境（av1 回 unsupported），因此天然覆蓋負向路徑。驗證：CI 該工作通過，log 顯示測試數與本機一致。
 
 ## 5. 文件與發佈說明

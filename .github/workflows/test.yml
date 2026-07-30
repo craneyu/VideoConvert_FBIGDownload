@@ -50,6 +50,22 @@ jobs:
 
       # --lib only: the unit tests need no WebView2, no bundled binary, and no
       # frontend build, so nothing here depends on npm or tauri-action.
-      - name: cargo test
+      #
+      # Split per platform for one reason: the Windows run declares what answer this
+      # environment must give for AV1. A runner has no AV1 Video Extension, so the
+      # capability query has to answer "unsupported" here — the half a developer
+      # desktop with the extension cannot produce without uninstalling it. Asserting
+      # it makes the negative path genuinely covered rather than merely assumed, and
+      # if a future runner image ships an AV1 decoder this fails loudly, which is when
+      # someone needs to know that this coverage disappeared.
+      - name: cargo test (windows)
+        if: matrix.platform == 'windows-latest'
+        working-directory: src-tauri
+        env:
+          VIDBRIDGE_EXPECT_AV1_DECODE: unsupported
+        run: cargo test --lib
+
+      - name: cargo test (macos)
+        if: matrix.platform == 'macos-latest'
         working-directory: src-tauri
         run: cargo test --lib
