@@ -69,11 +69,17 @@ Windows 的列舉不加硬體限制，任何可用的 AV1 解碼器都算 `Suppo
 
 沒有這一條，Windows 比 macOS 寬鬆會看起來像 bug，而不是決策。
 
-### 用移除 AV1 Video Extension 取得無支援環境來驗證負向路徑
+### 負向路徑交給 CI runner 驗證，不改動開發機的解碼器安裝
 
-規格要求在有／無解碼能力的兩種環境各驗一次。不需要第二台機器：在驗證機上暫時移除 Microsoft.AV1VideoExtension 即可得到無支援狀態，驗完再從 Store 裝回。CI 的 windows-latest runner 則是天然的無支援環境。
+規格要求在有／無解碼能力的兩種環境各驗一次。開發機（已裝 Microsoft.AV1VideoExtension）是有解碼能力的那一側；無解碼能力的那一側交給 GitHub 的 runner，它本來就沒有 AV1 擴充。
 
-因為能力查詢是每個行程只做一次並快取，切換擴充狀態後必須重啟 App 才會反映——這是既有的規格行為，驗證步驟必須包含重啟。
+考慮過的替代方案：在開發機上暫時移除該擴充、驗完再從 Store 裝回。已否決 —— 移除是系統層變更，而重新安裝通常得走 Microsoft Store，命令列不保證能自動完成，為了一次驗證去動使用者機器的解碼器安裝不值得。
+
+這決定了測試必須在 push 與 pull request 時就跑，而不能只掛在 release workflow 上：`publish` 只在 `v*` tag 或手動 dispatch 時觸發，且會真的建立 GitHub release，因此不能為了驗證而觸發它。測試因此放進獨立的 CI workflow，release workflow 保留同一個測試步驟作為「測試沒過就不發佈」的閘門。
+
+同一個 CI workflow 也跑 macOS，讓「macOS 分支未回歸」這件事有實際驗證，而不只是靠 diff 為空來推論。Linux 不納入：專案的發佈矩陣沒有 Linux，且該分支無條件回 unknown。
+
+因為能力查詢是每個行程只做一次並快取，切換擴充狀態後必須重啟 App 才會反映——這是既有的規格行為，任何涉及解碼器安裝變動的手動驗證都必須包含重啟。
 
 ## Implementation Contract
 

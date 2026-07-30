@@ -12,12 +12,12 @@
 
 ## 3. 跨平台答案一致性
 
-- [ ] 3.1 確認「三態語意寫進規格：允許各平台不同保守程度」所描述的行為在三個平台都成立，即 Three-State Codec Decode Capability 的平台對照表為真：macOS 仍以硬體查詢回 supported 或 unsupported、Windows 可回 supported 或 unsupported、Linux 對每個編碼都回 unknown。驗證：三個平台各自的 cargo test --lib 全綠，且只有 supported 會讓下載路徑選擇保留原始串流（既有的 plan_post_processing 測試涵蓋此點，不需新增）。
+- [ ] 3.1 確認「三態語意寫進規格：允許各平台不同保守程度」所描述的行為在三個平台都成立，即 Three-State Codec Decode Capability 的平台對照表為真：macOS 仍以硬體查詢回 supported 或 unsupported、Windows 可回 supported 或 unsupported、Linux 對每個編碼都回 unknown。驗證：Windows 與 macOS 的 cargo test --lib 在 CI 上全綠（Linux 非發佈平台，其分支無條件回 unknown 且本次零改動，以 diff 為證），且只有 supported 會讓下載路徑選擇保留原始串流（既有的 plan_post_processing 測試涵蓋此點，不需新增）。
 
 ## 4. 兩種實機環境驗證
 
 - [ ] 4.1 在有 AV1 解碼能力的 Windows 上驗證正向路徑：設定頁「自動判斷」的說明文字從「未能確認本機可解碼 AV1 → 重新編碼為 H.264」變為「本機可解碼 AV1 → 保留原始畫質」，且下載一支 AV1 來源的 Facebook Reel 後，後處理狀態文字為容器最佳化、輸出視訊編碼為 av1、檔案大小接近原檔。驗證：目視設定頁文字，並以 ffprobe 確認輸出編碼與大小。
-- [ ] 4.2 依「用移除 AV1 Video Extension 取得無支援環境來驗證負向路徑」驗證反向行為：暫時移除 Microsoft.AV1VideoExtension、重啟 App（能力查詢每個行程只做一次，不重啟不會反映），確認自動判斷回到重新編碼、輸出編碼為 h264，驗完從 Store 裝回。驗證：以 ffprobe 確認輸出為 h264，且設定頁文字回到未能確認的版本。
+- [ ] 4.2 依「負向路徑交給 CI runner 驗證，不改動開發機的解碼器安裝」驗證無解碼能力環境的行為：新增在 push 與 pull request 時觸發的 CI workflow，在 windows-latest 上跑單元測試，使 `windows_answers_definitively_for_a_mapped_codec` 在一台沒有 AV1 擴充的機器上執行 —— 該環境下 av1 必須回 unsupported（而非 unknown），這正是負向路徑。驗證：該 workflow 在本 PR 的 CI 執行成功，且 log 顯示的測試數與本機一致。
 - [x] 4.3 [P] 讓 Windows 的單元測試在 CI 上持續被執行：在 .github/workflows/release.yml 的 windows-latest 工作加入 cargo test --lib，並確認該 runner 屬於無 AV1 解碼能力環境（av1 回 unsupported），因此天然覆蓋負向路徑。驗證：CI 該工作通過，log 顯示測試數與本機一致。
 
 ## 5. 文件與發佈說明
