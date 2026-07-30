@@ -13,7 +13,7 @@
 - [x] 3.1 讓 `download_video` 執行期間不再佔用 async runtime 的 worker：保留其 async 宣告，把逐行讀取子行程輸出與等待其結束的阻塞區段包進 `tauri::async_runtime::spawn_blocking` 並 await 結果，且阻塞區段 panic 時回傳錯誤字串而非中止 runtime。交付 `Long-Running Commands Do Not Block The Async Runtime`，並落實 design 決策「阻塞工作以 spawn_blocking 移出 async runtime」。實作位置為 `src-tauri/src/commands/download.rs`。驗證：手動在一個重新編碼進行中的同時開啟設定頁並修改設定，確認設定頁正常回應。
 - [x] 3.2 讓下載的後處理階段依既有的 remux 或重新編碼判定結果決定是否取得 CPU 許可：判定為重新編碼才取得許可，判定為 remux 直接執行不排隊。交付 `Remux Is Exempt From The CPU Budget`，並落實 design 決策「容器 remux 不取得 CPU 許可」。驗證：新增單元測試以既有的後處理決策結果為輸入，斷言 remux 不需要許可、重新編碼需要許可。
 - [x] 3.3 讓下載在進入 CPU 許可等待前先發出「等待編碼」狀態，沿用既有的下載進度事件與其狀態文字欄位承載（新增一個狀態文字常數），進度值為下載階段的既有上限值，不新增事件通道。交付 `Phase-Scoped Permit Acquisition`，並落實 design 決策「分階段許可：網路階段結束即釋放，不被 CPU 等待佔用」。驗證：手動以網路 3、CPU 1 排入三支需要重新編碼的影片，確認第一支下載完成時前端收到該狀態文字。
-- [x] 3.4 [P] 讓 `transcode_video` 同樣不佔用 async runtime 的 worker，並在開始編碼前向同一個 CPU 許可池取得許可。交付 `Transcoding Shares Its Limit With Download Post-Processing`。實作位置為 `src-tauri/src/commands/transcode.rs`。驗證：手動先讓一個下載進入重新編碼階段，再於轉檔頁籤啟動一個任務，確認該轉檔任務顯示為等待而未立刻開始。
+- [x] 3.4 [P] 讓 `transcode_video` 同樣不佔用 async runtime 的 worker，並在開始編碼前向同一個 CPU 許可池取得許可。交付 `Transcoding Shares Its Limit With Download Post-Processing`。實作位置為 `src-tauri/src/commands/transcode.rs`。驗證：讓一個轉檔任務持有 CPU 許可，同時排入一支需要重新編碼的下載；在 yt-dlp 結束之後持續取樣 `pgrep -f ffmpeg | wc -l`，其值須恆為 1 —— 若預算未共用，下載的重新編碼會立刻開出第二個 ffmpeg。以行程數而非 UI 標籤為準，因為標籤只在短暫的等待窗內出現，難以穩定捕捉。注意下載進行中 yt-dlp 自己也會開 ffmpeg，故須等 yt-dlp 結束後再開始計數。
 
 ## 4. 前端佇列與狀態顯示
 

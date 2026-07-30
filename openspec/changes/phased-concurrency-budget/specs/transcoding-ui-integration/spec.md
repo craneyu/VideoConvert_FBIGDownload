@@ -33,6 +33,11 @@ The interface SHALL NOT display a concurrency limit that is not enforced.
 
 The transcoding limit SHALL be the same budget that bounds re-encoding in the download pipeline, not a second independent limit. A transcoding task SHALL wait when the budget is fully consumed by download post-processing, and the reverse SHALL also hold.
 
+#### Scenario: A download's re-encode waits for a running transcode
+
+- **WHEN** the CPU concurrency setting is 1, a transcoding task is running, and a download finishes its network phase and needs re-encoding
+- **THEN** the download SHALL wait, and no second encoder process SHALL be started while the transcode holds the permit
+
 #### Scenario: A transcoding task waits for download post-processing
 
 - **WHEN** the CPU concurrency setting is 1, a download is re-encoding, and the user starts a transcoding task
