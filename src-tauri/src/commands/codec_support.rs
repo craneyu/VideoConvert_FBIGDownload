@@ -160,26 +160,191 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::{support_from_lookup, DecodeSupport};
+    use windows::core::GUID;
+    use windows::Win32::Media::MediaFoundation::{
+        IMFActivate, MFTEnumEx, MFMediaType_Video, MFVideoFormat_AV1, MFVideoFormat_H264,
+        MFVideoFormat_HEVC, MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT,
+        MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO,
+    };
+    use windows::Win32::System::Com::CoTaskMemFree;
+
+    /// Which kinds of decoder count as evidence that this machine can play a codec.
+    ///
+    /// **Not restricted to hardware, deliberately.** The question being answered is
+    /// "can *this machine* decode it", and a software decoder decodes it. Restricting
+    /// to hardware would answer a different question and, on a machine whose GPU has
+    /// no AV1 path but which has the AV1 Video Extension installed, would report
+    /// Unsupported for a file that plays — forgoing the whole improvement. macOS
+    /// answers the narrower hardware-only question because VideoToolbox offers
+    /// nothing else; that asymmetry is allowed, and both directions are safe because
+    /// neither reports Supported for something it cannot play.
+    ///
+    /// `MFT_ENUM_FLAG_TRANSCODE_ONLY` is left out on purpose: a decoder marked
+    /// transcode-only is not evidence the user can play the file.
+    const ENUM_FLAGS: MFT_ENUM_FLAG = MFT_ENUM_FLAG(
+        MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_ASYNCMFT.0 | MFT_ENUM_FLAG_HARDWARE.0,
+    );
+
+    /// The Media Foundation subtype for a codec named the way `ffprobe` names it.
+    ///
+    /// Kept separate from `video_codec_fourcc` rather than sharing one table: MP4
+    /// sample-entry codes and MF subtypes disagree — h264 is `avc1` in an MP4 but
+    /// `H264` here, hevc is `hvc1` there but `HEVC` here. Reusing the MP4 codes would
+    /// enumerate a subtype nothing is registered for and report Unsupported for a
+    /// codec the machine decodes.
+    ///
+    /// `None` means no mapping, which callers treat as unknown rather than guessing.
+    fn video_subtype(codec: &str) -> Option<GUID> {
+        if codec.eq_ignore_ascii_case("av1") {
+            Some(MFVideoFormat_AV1)
+        } else if codec.eq_ignore_ascii_case("h264") {
+            Some(MFVideoFormat_H264)
+        } else if codec.eq_ignore_ascii_case("hevc") || codec.eq_ignore_ascii_case("h265") {
+            Some(MFVideoFormat_HEVC)
+        } else {
+            None
+        }
+    }
+
+    /// Map a decoder count onto an answer.
+    ///
+    /// `Some(0)` and `None` are different answers and must stay different: the first
+    /// is the platform saying "there is no decoder", the second is the enumeration
+    /// failing so the platform never answered at all.
+    fn support_from_count(count: Option<u32>) -> DecodeSupport {
+        support_from_lookup(count.map(|found| found > 0))
+    }
+
+    /// How many registered decoders accept `subtype` as an input type.
+    ///
+    /// `None` if the enumeration itself failed. Only the count is used — no decoder
+    /// is instantiated, because the presence of one is the whole answer and creating
+    /// one would cost far more than the query is worth.
+    fn decoder_count(subtype: GUID) -> Option<u32> {
+        let input = MFT_REGISTER_TYPE_INFO {
+            guidMajorType: MFMediaType_Video,
+            guidSubtype: subtype,
+        };
+        let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count: u32 = 0;
+
+        // Safe: `input` outlives the call, both out-parameters are owned locals, and
+        // the array the call allocates is released below before this returns. No COM
+        // initialisation is needed — this is a registry-backed lookup, verified on
+        // Windows 11 to succeed with neither CoInitializeEx nor MFStartup called.
+        unsafe {
+            MFTEnumEx(
+                MFT_CATEGORY_VIDEO_DECODER,
+                ENUM_FLAGS,
+                Some(&input),
+                None,
+                &mut activates,
+                &mut count,
+            )
+            .ok()?;
+
+            if !activates.is_null() {
+                // Each slot holds a reference we now own. Reading the Option out and
+                // dropping it releases that reference; the array itself was allocated
+                // by the callee, so it goes back through CoTaskMemFree.
+                for i in 0..count as usize {
+                    drop(std::ptr::read(activates.add(i)));
+                }
+                CoTaskMemFree(Some(activates as *const std::ffi::c_void));
+            }
+        }
+
+        Some(count)
+    }
+
+    pub fn support(codec: &str) -> DecodeSupport {
+        let Some(subtype) = video_subtype(codec) else {
+            return DecodeSupport::Unknown;
+        };
+        support_from_count(decoder_count(subtype))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::commands::codec_support::DecodeSupport;
+
+        // The enumeration outcome is mapped by a pure function so these four cases
+        // are testable on any machine: a test must not depend on which decoders the
+        // build agent happens to have installed.
+
+        #[test]
+        fn a_decoder_found_is_supported() {
+            assert_eq!(support_from_count(Some(1)), DecodeSupport::Supported);
+        }
+
+        #[test]
+        fn enumeration_finding_nothing_is_unsupported() {
+            // Distinct from a failed lookup: the platform answered, and said no.
+            assert_eq!(support_from_count(Some(0)), DecodeSupport::Unsupported);
+        }
+
+        #[test]
+        fn a_failed_enumeration_is_unknown() {
+            assert_eq!(support_from_count(None), DecodeSupport::Unknown);
+        }
+
+        #[test]
+        fn an_unmapped_codec_name_is_unknown_without_enumerating() {
+            // vp9 has no subtype mapping, so the platform is never asked. Unknown
+            // rather than Unsupported: "we did not ask" is not "there is none".
+            assert_eq!(video_subtype("vp9"), None);
+            assert_eq!(support("vp9"), DecodeSupport::Unknown);
+        }
+
+        #[test]
+        fn subtype_lookup_ignores_case() {
+            for name in ["AV1", "av1", "Av1"] {
+                assert_eq!(
+                    video_subtype(name),
+                    Some(windows::Win32::Media::MediaFoundation::MFVideoFormat_AV1),
+                    "codec {}",
+                    name
+                );
+            }
+        }
+
+        #[test]
+        fn the_mapped_codecs_are_the_ones_the_pipeline_can_remux() {
+            use windows::Win32::Media::MediaFoundation::{MFVideoFormat_AV1, MFVideoFormat_H264};
+            assert_eq!(video_subtype("av1"), Some(MFVideoFormat_AV1));
+            assert_eq!(video_subtype("h264"), Some(MFVideoFormat_H264));
+        }
+
+        // Locks in the decision that software decoding counts as support. If someone
+        // narrows the enumeration to hardware decoders only, this fails — which is
+        // the point: on a machine with no AV1 hardware path that change silently
+        // turns every answer into Unsupported and the feature stops doing anything.
+        #[test]
+        fn the_enumeration_is_not_restricted_to_hardware_decoders() {
+            use windows::Win32::Media::MediaFoundation::MFT_ENUM_FLAG_SYNCMFT;
+            assert_ne!(
+                ENUM_FLAGS.0 & MFT_ENUM_FLAG_SYNCMFT.0,
+                0,
+                "software decoders must stay in scope"
+            );
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod platform {
     use super::DecodeSupport;
 
-    /// Every platform other than macOS answers "unknown", so downloads are
-    /// re-encoded exactly as they were before this capability existed.
+    /// Linux answers "unknown", so downloads are re-encoded exactly as they were
+    /// before this capability existed.
     ///
-    /// Linux is a limitation in principle: nothing at the system level represents
-    /// "can the user's player decode this".
-    ///
-    /// **Windows is deliberately deferred, not overlooked.** Enumerating Media
-    /// Foundation decoders is the intended approach — Windows 11 24H2 and later
-    /// carry AV1 support, earlier versions need the user to install an extension, so
-    /// the lookup would reflect the machine honestly. But `MFTEnumEx` is a COM API
-    /// needing an extra dependency, and this project's Windows target cannot be
-    /// built on macOS at all: `cargo check --target x86_64-pc-windows-msvc` fails
-    /// while compiling `ring`'s C sources with "assert.h file not found". Shipping
-    /// COM code that cannot be compiled or behaviourally tested where it was written
-    /// is worse than answering "unknown" — the latter only forgoes an improvement,
-    /// the former can hand the user a file that will not play.
+    /// This is a limitation in principle rather than deferred work: nothing at the
+    /// system level represents "can the user's player decode this". A desktop can
+    /// have ffmpeg, a browser, and a media player with three different codec sets.
     pub fn support(_codec: &str) -> DecodeSupport {
         DecodeSupport::Unknown
     }
@@ -298,12 +463,23 @@ mod tests {
 
     // The platform branches. Exactly one is compiled per target.
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[test]
-    fn non_macos_platforms_answer_unknown_for_every_codec() {
+    fn linux_answers_unknown_for_every_codec() {
         for codec in ["av1", "h264", "vp9", "anything"] {
             assert_eq!(platform::support(codec), DecodeSupport::Unknown, "codec {}", codec);
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_answers_definitively_for_a_mapped_codec() {
+        // Which way it answers depends on which decoders the machine has — a build
+        // agent without the AV1 Video Extension answers Unsupported, a desktop with
+        // it answers Supported — so the assertion is that it commits to an answer
+        // instead of falling through to unknown the way it did before this platform
+        // was implemented.
+        assert_ne!(platform::support("av1"), DecodeSupport::Unknown);
     }
 
     #[cfg(target_os = "macos")]
