@@ -9,9 +9,18 @@ Only tasks in a network-active state SHALL count towards this limit. A task that
 - **WHEN** the network concurrency setting is 2 and the user adds 5 video links in rapid succession
 - **THEN** only the first 2 SHALL start downloading immediately, while the others remain in "Pending" status
 
-#### Scenario: Raising the limit takes effect without a restart
-- **WHEN** the user changes the network concurrency setting from 2 to 4 while 2 downloads are active and 3 are pending
-- **THEN** 2 additional pending downloads SHALL start
+#### Scenario: The limit comes from the setting rather than a fixed value
+- **WHEN** the network concurrency setting is 4 and the user adds 5 video links in rapid succession
+- **THEN** the first 4 SHALL start downloading immediately, and the queue SHALL NOT stop at any other number
+
+#### Scenario: A raised limit is picked up without restarting the application
+- **WHEN** the network concurrency setting is raised and the download queue next decides whether to start a task
+- **THEN** that decision SHALL use the new value
+
+Note: the settings interface is a separate route, and navigating to it discards the
+in-memory download list. A limit change therefore cannot be observed against
+downloads that were already queued before the change. Making the queue outlive
+navigation is out of scope for this capability as specified.
 
 #### Scenario: The displayed limit matches the setting
 - **WHEN** the network concurrency setting is 4 and the CPU concurrency setting is 1

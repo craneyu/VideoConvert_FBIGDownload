@@ -86,8 +86,15 @@
     {:else if settingsStore.settings}
       <div class="space-y-4">
 
+        <!--
+          The download card and the concurrency card share a row. The download card
+          is the tall one, so putting concurrency beside it costs almost no extra
+          height — which is what keeps every setting on one 800x600 screen.
+        -->
+        <div class="grid grid-cols-3 gap-4 items-start">
+
         <!-- Download Settings -->
-        <section class="bg-white dark:bg-neutral-900 rounded-2xl p-5 shadow-sm border border-neutral-200/80 dark:border-neutral-800 transition-all hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-700">
+        <section class="col-span-2 bg-white dark:bg-neutral-900 rounded-2xl p-5 shadow-sm border border-neutral-200/80 dark:border-neutral-800 transition-all hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-700">
           <h2 class="text-xs font-black uppercase tracking-widest text-neutral-400 mb-4 flex items-center gap-2">
             <svg class="w-4 h-4 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
             下載偏好設定
@@ -109,24 +116,6 @@
                 >
                   瀏覽
                 </button>
-              </div>
-            </div>
-
-            <div class="space-y-1.5">
-              <label for="network-concurrency" class="text-xs font-bold text-neutral-500 dark:text-neutral-400 ml-1">同時下載數量</label>
-              <div class="flex items-center gap-3">
-                <input
-                  id="network-concurrency"
-                  type="number"
-                  min={CONCURRENCY_RANGES.max_network_concurrency.min}
-                  max={CONCURRENCY_RANGES.max_network_concurrency.max}
-                  value={settingsStore.settings.max_network_concurrency}
-                  onchange={handleConcurrencyChange('max_network_concurrency')}
-                  class="w-20 bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
-                />
-                <p class="text-xs text-neutral-500 dark:text-neutral-400 leading-snug flex-1">
-                  可設 {CONCURRENCY_RANGES.max_network_concurrency.min}–{CONCURRENCY_RANGES.max_network_concurrency.max}，<span class="font-bold">立即生效</span>。只計算正在下載的任務；已下載完成、等待編碼的任務不佔用名額。
-                </p>
               </div>
             </div>
 
@@ -185,6 +174,59 @@
         </section>
 
         <!--
+          Concurrency gets its own card so the two limits sit together: they are one
+          decision with two halves, and the download card would otherwise grow tall
+          enough to push this row past a single 800x600 screen — which the spacing
+          note at the top of this file exists to prevent.
+        -->
+        <section class="bg-white dark:bg-neutral-900 rounded-2xl p-5 shadow-sm border border-neutral-200/80 dark:border-neutral-800 transition-all hover:shadow-md hover:border-neutral-300 dark:hover:border-neutral-700">
+          <h2 class="text-xs font-black uppercase tracking-widest text-neutral-400 mb-4 flex items-center gap-2">
+            <svg class="w-4 h-4 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"></path></svg>
+            並行處理
+          </h2>
+
+          <div class="space-y-3">
+            <div class="flex items-center gap-3">
+              <input
+                id="network-concurrency"
+                type="number"
+                min={CONCURRENCY_RANGES.max_network_concurrency.min}
+                max={CONCURRENCY_RANGES.max_network_concurrency.max}
+                value={settingsStore.settings.max_network_concurrency}
+                onchange={handleConcurrencyChange('max_network_concurrency')}
+                class="w-16 bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+              />
+              <div class="min-w-0">
+                <label for="network-concurrency" class="block text-xs font-bold">同時下載</label>
+                <p class="text-[10px] text-neutral-500 dark:text-neutral-400 leading-tight">1–8・立即生效</p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-3">
+              <input
+                id="cpu-concurrency"
+                type="number"
+                min={CONCURRENCY_RANGES.max_cpu_concurrency.min}
+                max={CONCURRENCY_RANGES.max_cpu_concurrency.max}
+                value={settingsStore.settings.max_cpu_concurrency}
+                onchange={handleConcurrencyChange('max_cpu_concurrency')}
+                class="w-16 bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
+              />
+              <div class="min-w-0">
+                <label for="cpu-concurrency" class="block text-xs font-bold">同時編碼</label>
+                <p class="text-[10px] text-amber-600 dark:text-amber-500 leading-tight">1–2・變更後需重啟</p>
+              </div>
+            </div>
+
+            <p class="text-[10px] text-neutral-500 dark:text-neutral-400 leading-snug pt-1 border-t border-neutral-100 dark:border-neutral-800/50">
+              編碼名額由下載後處理與轉檔<span class="font-bold">共用</span>。設為 2 是為了<span class="font-bold">讓程式保持回應</span>，不會更快 —— 編碼本來就吃滿所有核心。等待編碼的下載不佔用下載名額。
+            </p>
+          </div>
+        </section>
+
+        </div>
+
+        <!--
           Transcoding and appearance sit side by side rather than stacked. Stacking
           a third section pushed the page past one 800x600 screen, which the spacing
           note above exists to prevent.
@@ -216,31 +258,6 @@
             </div>
           </div>
 
-          <!--
-            The CPU limit lives here rather than under downloads because it governs
-            re-encoding, which both the transcoding tab and the post-download step
-            perform. They draw on the same budget.
-          -->
-          <div class="space-y-1.5 mt-4 pt-3 border-t border-neutral-100 dark:border-neutral-800/50">
-            <label for="cpu-concurrency" class="text-xs font-bold text-neutral-500 dark:text-neutral-400 ml-1">同時編碼數量</label>
-            <div class="flex items-center gap-3">
-              <input
-                id="cpu-concurrency"
-                type="number"
-                min={CONCURRENCY_RANGES.max_cpu_concurrency.min}
-                max={CONCURRENCY_RANGES.max_cpu_concurrency.max}
-                value={settingsStore.settings.max_cpu_concurrency}
-                onchange={handleConcurrencyChange('max_cpu_concurrency')}
-                class="w-20 bg-neutral-50 dark:bg-neutral-800/50 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 text-sm focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all outline-none"
-              />
-              <p class="text-xs text-neutral-500 dark:text-neutral-400 leading-snug flex-1">
-                下載後處理與轉檔<span class="font-bold">共用</span>此上限，可設 {CONCURRENCY_RANGES.max_cpu_concurrency.min}–{CONCURRENCY_RANGES.max_cpu_concurrency.max}。
-              </p>
-            </div>
-            <p class="text-[11px] text-neutral-500 dark:text-neutral-400 leading-snug ml-1">
-              設為 2 是為了<span class="font-bold">讓程式保持回應</span>，不會更快 —— 編碼本來就吃滿所有核心，並行兩個是把彼此速度砍半而非加總。<span class="font-bold text-amber-600 dark:text-amber-500">變更於下次啟動生效。</span>
-            </p>
-          </div>
         </section>
 
         <!-- Appearance -->
