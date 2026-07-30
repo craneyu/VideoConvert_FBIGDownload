@@ -75,6 +75,8 @@ Windows 的列舉不加硬體限制，任何可用的 AV1 解碼器都算 `Suppo
 
 考慮過的替代方案：在開發機上暫時移除該擴充、驗完再從 Store 裝回。已否決 —— 移除是系統層變更，而重新安裝通常得走 Microsoft Store，命令列不保證能自動完成，為了一次驗證去動使用者機器的解碼器安裝不值得。
 
+光是「CI 綠燈」不足以證明負向路徑被覆蓋：斷言「av1 不是 unknown」在 supported 與 unsupported 兩種情況下都會通過。因此期望答案改由環境變數 `VIDBRIDGE_EXPECT_AV1_DECODE` 宣告，CI 的 Windows job 設為 `unsupported`，未設或空字串則不斷言。這讓「runner 上確實回 unsupported」成為 CI 會驗的事實；若日後 runner 映像開始內建 AV1 解碼器，這個測試會失敗，正好是需要有人知道「這份覆蓋消失了」的時刻。
+
 這決定了測試必須在 push 與 pull request 時就跑，而不能只掛在 release workflow 上：`publish` 只在 `v*` tag 或手動 dispatch 時觸發，且會真的建立 GitHub release，因此不能為了驗證而觸發它。測試因此放進獨立的 CI workflow，release workflow 保留同一個測試步驟作為「測試沒過就不發佈」的閘門。
 
 同一個 CI workflow 也跑 macOS，讓「macOS 分支未回歸」這件事有實際驗證，而不只是靠 diff 為空來推論。Linux 不納入：專案的發佈矩陣沒有 Linux，且該分支無條件回 unknown。

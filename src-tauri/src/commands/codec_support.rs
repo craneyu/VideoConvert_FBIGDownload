@@ -482,6 +482,54 @@ mod tests {
         assert_ne!(platform::support("av1"), DecodeSupport::Unknown);
     }
 
+    /// Assert the answer this particular machine is supposed to give for AV1.
+    ///
+    /// `windows_answers_definitively_for_a_mapped_codec` above can only assert "not
+    /// unknown", because which of the other two answers is correct depends on what is
+    /// installed. That leaves the more interesting half unverified: a green test run
+    /// does not distinguish "this machine has no decoder and correctly said
+    /// unsupported" from "this machine has one and said supported".
+    ///
+    /// So the expectation comes from the environment. CI sets it to `unsupported` on
+    /// the Windows runner, which carries no AV1 Video Extension — the half a developer
+    /// desktop with the extension cannot produce without uninstalling it. If a future
+    /// runner image ships an AV1 decoder this test fails, which is exactly when
+    /// someone needs to know: the negative path would no longer be covered anywhere.
+    ///
+    /// Unset means assert nothing, because the correct answer is genuinely not
+    /// knowable from the source. A value that is not one of the three answers is a
+    /// mistake in the caller and fails loudly rather than silently skipping.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn av1_answer_matches_this_environments_declared_expectation() {
+        const VAR: &str = "VIDBRIDGE_EXPECT_AV1_DECODE";
+        let Ok(declared) = std::env::var(VAR) else {
+            return;
+        };
+        // Empty counts as unset. A CI matrix that carries the expectation per platform
+        // ends up passing an empty string on the platforms that have no expectation,
+        // and that should mean "assert nothing", not "fail".
+        if declared.trim().is_empty() {
+            return;
+        }
+        let expected = match declared.trim() {
+            "supported" => DecodeSupport::Supported,
+            "unsupported" => DecodeSupport::Unsupported,
+            "unknown" => DecodeSupport::Unknown,
+            other => panic!(
+                "{} must be one of supported/unsupported/unknown, got {:?}",
+                VAR, other
+            ),
+        };
+        assert_eq!(
+            platform::support("av1"),
+            expected,
+            "{} declared {:?}",
+            VAR,
+            declared
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_answers_definitively_for_a_mapped_codec() {
