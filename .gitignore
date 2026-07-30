@@ -10,3 +10,8 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .spectra/
 openspec/.vector-search.db*
+
+# yt-dlp 的未完成下載。曾有一支 64KB 的測試殘檔被納入版控（repo 根目錄的
+# test_video.f1347094447333061v.mp4.part），而根目錄不在任何既有規則的涵蓋範圍內。
+*.part
+*.ytdl
