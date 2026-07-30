@@ -12,7 +12,7 @@
 
 ## 3. 跨平台答案一致性
 
-- [ ] 3.1 確認「三態語意寫進規格：允許各平台不同保守程度」所描述的行為在三個平台都成立，即 Three-State Codec Decode Capability 的平台對照表為真：macOS 仍以硬體查詢回 supported 或 unsupported、Windows 可回 supported 或 unsupported、Linux 對每個編碼都回 unknown。驗證：Windows 與 macOS 的 cargo test --lib 在 CI 上全綠（Linux 非發佈平台，其分支無條件回 unknown 且本次零改動，以 diff 為證），且只有 supported 會讓下載路徑選擇保留原始串流（既有的 plan_post_processing 測試涵蓋此點，不需新增）。
+- [x] 3.1 確認「三態語意寫進規格：允許各平台不同保守程度」所描述的行為在三個平台都成立，即 Three-State Codec Decode Capability 的平台對照表為真：macOS 仍以硬體查詢回 supported 或 unsupported、Windows 可回 supported 或 unsupported、Linux 對每個編碼都回 unknown。驗證：Windows 與 macOS 的 cargo test --lib 在 CI 上全綠（Linux 非發佈平台，其分支無條件回 unknown 且本次零改動，以 diff 為證），且只有 supported 會讓下載路徑選擇保留原始串流（既有的 plan_post_processing 測試涵蓋此點，不需新增）。
 
 ## 4. 兩種實機環境驗證
 
