@@ -1,1 +1,23 @@
 @import "tailwindcss";
+
+/* Tailwind v4 binds `dark:` to the prefers-color-scheme media query, which leaves
+   no way to override the OS preference from inside the app. Rebinding the variant
+   to an attribute makes rendering a function of `data-theme` alone — the attribute
+   is always written with a concrete value, so the media query never participates.
+
+   This must live here rather than in the Tailwind config file: that file is not
+   loaded at all, because this stylesheet declares no `@config` directive. The v3
+   `darkMode: 'class'` route would therefore fail silently. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* The variant above only reaches our own utilities. Natively painted UI — the
+   transcoding option dropdowns, the settings preset dropdown, scrollbars — follows
+   `color-scheme` instead, and would otherwise keep tracking the OS: a light theme
+   on a dark system would still open dark dropdowns. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}

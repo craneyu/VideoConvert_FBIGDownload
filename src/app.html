@@ -2,6 +2,31 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <script>
+      // Runs before the first paint — which the authoritative theme value cannot,
+      // since it lives in SQLite behind an async IPC call. Without this, a user on
+      // a dark theme sees a white flash on every launch.
+      //
+      // Reads the same cache key as $lib/theme ("vidbridge:theme-mode") and must be
+      // kept in step with it. Only "light" and "dark" are honoured directly; "system",
+      // a hand-edited value, or a mode some future version drops all fall through to
+      // the OS preference. Every step is wrapped, because throwing here would block
+      // the page load for the sake of a colour.
+      try {
+        var cached = null;
+        try {
+          cached = localStorage.getItem("vidbridge:theme-mode");
+        } catch (e) {
+          // Storage disabled or unavailable — the OS preference below still applies.
+        }
+        document.documentElement.dataset.theme =
+          cached === "light" || cached === "dark"
+            ? cached
+            : window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+      } catch (e) {}
+    </script>
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Tauri + SvelteKit + Typescript App</title>

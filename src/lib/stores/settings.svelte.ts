@@ -1,10 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { ThemeMode } from '$lib/theme';
 
 export interface Settings {
     download_path: string;
     auto_organize: boolean;
     transcoding_preset: string;
     detect_clipboard: boolean;
+    // The backend narrows this to the same three values before it ever reaches
+    // here, so the union is a faithful description rather than an optimistic one.
+    theme: ThemeMode;
 }
 
 class SettingsStore {
@@ -31,9 +35,12 @@ class SettingsStore {
         }
     }
 
-    async update(key: keyof Settings, value: any) {
+    // Generic over the key so each setting only accepts its own value type — an
+    // unrecognised theme literal is then a compile error here rather than a value
+    // the backend has to quietly discard.
+    async update<K extends keyof Settings>(key: K, value: Settings[K]) {
         if (!this.settings) return;
-        
+
         // Optimistic update
         const originalValue = this.settings[key];
         (this.settings as any)[key] = value;
