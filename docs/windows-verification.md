@@ -1,6 +1,6 @@
 # Windows 驗證清單
 
-本文用於在 Windows 上驗證 `fix/tray-settings-navigation` 分支（PR #6）。
+本文原是為驗證 `fix/tray-settings-navigation` 分支（PR #6）而寫，該 PR 已合併；現在是拿來驗當前的 `main`（最近一輪驗證跑在 **v0.1.6**）。各節記錄的實測結果都會註明所在版本。
 
 **為什麼需要這份清單**：所有 `#[cfg(target_os = "windows")]` 的程式碼在 macOS 上**從未被編譯過**，因此 macOS 端的 `cargo check` 與 `cargo test` 全綠**不代表** Windows 能建置成功。下方 A 組就是為此而設。
 
@@ -20,7 +20,8 @@
 
 ```powershell
 git fetch origin
-git checkout fix/tray-settings-navigation
+git checkout main
+git pull --ff-only
 npm install
 ```
 
@@ -81,7 +82,7 @@ cargo test --lib
 | `src-tauri/src/commands/utils.rs` | `find_tool_path` 的 Windows 路徑搜尋區塊 |
 | `src-tauri/src/commands/utils.rs` | `install_tool_windows` |
 
-**預期**：`cargo check` 無錯誤；`cargo test --lib` **40 passed**（測試本身與平台無關，數字應與 macOS 一致）。
+**預期**：`cargo check` 無錯誤；`cargo test --lib` 全綠（測試本身與平台無關，數字應與 macOS 一致 —— 會隨後續 change 增加，v0.1.6 當時為 **104 passed**）。
 
 接著：
 
@@ -134,9 +135,25 @@ npm run tauri dev
 | 測試 | 步驟 | 預期 |
 | --- | --- | --- |
 | C-1 中日文長標題 | 下載一支貼文說明很長的日文/中文 FB reel | 成功，檔名被截短且無亂碼 |
-| C-2 英文長標題 + 深路徑 | 下載路徑設為層數較深、名稱較長的資料夾，下載一支**英文**長標題影片 | **這一項可能失敗**。若出現路徑過長錯誤，請附上完整錯誤訊息 |
+| C-2 英文長標題 + 深路徑 | 下載路徑設為層數較深、名稱較長的資料夾，下載一支**英文**長標題影片 | 見下方實測 —— **上面的推算沒有成立** |
 
-若 C-2 失敗，修法是把預算改成同時考慮「完整路徑字元數」而非只看檔名位元組數；請回報後再處理，不要自行加大預算。
+### C-2 實測結果：沒有失敗，因為寫檔的是 ffmpeg
+
+在 Windows 11 25H2 實測（`LongPathsEnabled = 0`，所以 260 字元上限確實生效），固定 200 字元檔名並逐步加長路徑前綴：
+
+| 前綴長度 | 完整路徑總長 | 結果 |
+| --- | --- | --- |
+| 41 字元（`C:\Users\<你>\Videos\VidBridge\Facebook\`） | 241 | 成功 |
+| 59 / 60 / 64 / 71 字元 | 259 / 260 / 264 / 271 | **全部成功** |
+| 100 / 150 / 200 字元 | 300 / 350 / 400 | **全部成功**，輸出位元組數與來源一致 |
+
+**為什麼推算沒成立**：最終檔案的寫入者是 **ffmpeg**，不是 Rust 那一側。實測的 ffmpeg 8.1.1（gyan.dev build）會自行處理超長路徑；同一個 271 字元路徑用傳統 Win32 ANSI 路徑的 `cmd copy` 寫則如預期失敗（`The system cannot find the path specified.`），可見系統層的 260 限制是真的存在，只是 ffmpeg 繞過了它。
+
+所以**不需要**改 `bound_filename` 的預算，上面「275 字元 → 超過 MAX_PATH」那條推算對本專案的實際寫入路徑不適用。
+
+**殘餘風險（尚未驗，因為需要開視窗）**：檔案建得出來不代表別的程式讀得到。B 節的「開啟檔案夾」走的是 `explorer /select,<完整路徑>`，而 Explorer 對超過 260 字元的路徑向來不可靠；同理，使用者拿其他播放器開這個檔也可能失敗。若要驗，請在下載路徑很深的情況下實際點一次資料夾圖示。
+
+若日後真的遇到路徑過長錯誤，修法是把預算改成同時考慮「完整路徑字元數」而非只看檔名位元組數；請回報後再處理，不要自行加大預算。
 
 ---
 
@@ -247,6 +264,36 @@ macOS 以 VideoToolbox 查詢平台能否解碼 AV1，能解就直接保留原�
 
 之後若要補上 Windows 的自動判斷，需要在有／無 AV1 解碼支援的兩種 Windows 環境各驗
 一次「自動判斷」的解析結果與實際輸出 codec。
+
+### J 實測結果（Windows 11 25H2，build 26200）
+
+以一支真實 Facebook Reel 驗完第 3、4 步。來源正是本節假設的情境：**av1（Main）+
+HE-AAC，1080×1920，9.38 秒，2,068,245 bytes**。兩條路徑都是直接執行 `run_post_process`
+組出的同一組 ffmpeg 參數：
+
+| | 自動判斷（→ 重新編碼） | 保留原檔（→ 容器最佳化） |
+| --- | --- | --- |
+| 輸出視訊 codec | **h264** ✅ | **av1** ✅ |
+| 音訊 | 88,709 bps HE-AAC，**與來源完全相同** ✅（確實走 `-c:a copy`） | 同左 ✅ |
+| 耗時 | 5.41 秒 | **0.07 秒**（77 倍差距） |
+| 檔案大小 | 4,115,940 bytes（**比原檔大 99%**） | 2,068,245 bytes（與原檔相同） |
+
+兩點與原本敘述不同，值得記下：
+
+- **重編的膨脹比設計文件記的更大。** 文件記的是「大 53%」，這支直式 Reel 實際翻倍
+  （+99%）。也就是自動判斷在 Windows 上保守重編的代價，比原先評估的更高。
+- **這台機器播得動 AV1**，所以第 4 步最後一項的「播不了是預期的」在此屬於括號裡註明
+  的例外。此機為 25H2 且已安裝 `Microsoft.AV1VideoExtension 2.0.24.0`（軟體解碼）。
+  驗法不是靠「裝了擴充所以應該可以」推論，而是直接呼叫 Windows 自己的 Media
+  Foundation 縮圖提供者（`IShellItemImageFactory`，加 `SIIGBF_THUMBNAILONLY` 禁止退回
+  通用圖示）解出一張真實畫格。附帶一筆：此機 **沒有** AV1 硬體解碼路徑，
+  `ffmpeg -hwaccel d3d11va` 對 AV1 回 "Your platform doesn't support hardware
+  accelerated AV1 decoding"。
+
+**這對日後補實作的影響**：若用 `MFTEnumEx` 列舉，這台機器會回 `Supported`（有軟體解碼
+MFT），但 macOS 的 `VTIsHardwareDecodeSupported` 只認硬體解碼、在同樣硬體上會回
+`Unsupported` —— 同一台機器在兩套語意下答案相反。所以動手前要先決定**軟體解碼算不算
+`Supported`**，這比 COM 依賴本身更需要先講清楚。
 
 ## 建置安裝檔（可選）
 
